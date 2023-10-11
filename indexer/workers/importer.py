@@ -10,13 +10,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Union, cast
 
 from elastic_transport import NodeConfig, ObjectApiResponse
+from elasticsearch import Elasticsearch
 from pika.adapters.blocking_connection import BlockingChannel
 
-from indexer.elastic import (
-    add_elasticsearch_hosts,
-    check_elasticsearch_hosts,
-    create_elasticsearch_client,
-)
+from indexer.elastic import ElasticMixin
 from indexer.story import BaseStory
 from indexer.worker import StoryWorker, run
 
@@ -53,15 +50,12 @@ es_mappings = {
 class ElasticsearchConnector:
     def __init__(
         self,
-        hosts: Union[
-            str, List[Union[str, Mapping[str, Union[str, int]], NodeConfig]], None
-        ],
+        client: Elasticsearch,
         index_name: str,
         mappings: Mapping[str, Any],
         settings: Mapping[str, Any],
     ) -> None:
-        assert isinstance(hosts, str)
-        self.client = create_elasticsearch_client(hosts)
+        self.client = client
         self.index_name = index_name
         self.mappings = mappings
         self.settings = settings
@@ -89,10 +83,9 @@ class ElasticsearchConnector:
         return response
 
 
-class ElasticsearchImporter(StoryWorker):
+class ElasticsearchImporter(StoryWorker, ElasticMixin):
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
-        add_elasticsearch_hosts(ap)
         ap.add_argument(
             "--index-name",
             dest="index_name",
@@ -106,10 +99,6 @@ class ElasticsearchImporter(StoryWorker):
         assert self.args
         logger.info(self.args)
 
-        self.elasticsearch_hosts = check_elasticsearch_hosts(
-            self.args.elasticsearch_hosts
-        )
-
         index_name = self.args.index_name
         if index_name is None:
             logger.fatal("need --index-name defined")
@@ -117,7 +106,7 @@ class ElasticsearchImporter(StoryWorker):
         self.index_name = index_name
 
         self.connector = ElasticsearchConnector(
-            self.elasticsearch_hosts,
+            self.elasticsearch_client(),
             self.index_name,
             mappings=es_mappings,
             settings=es_settings,
