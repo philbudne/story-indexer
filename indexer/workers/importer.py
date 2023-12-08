@@ -93,6 +93,13 @@ class ElasticsearchImporter(ElasticMixin, StoryWorker):
             default=os.environ.get("ELASTICSEARCH_INDEX_NAME_PREFIX"),
             help="Elasticsearch index name prefix",
         )
+        ap.add_argument(
+            "--no-output",
+            action="store_false",
+            dest="output_msgs",
+            default=True,
+            help="Disable output to archiver",
+        )
 
     def process_args(self) -> None:
         super().process_args()
@@ -110,6 +117,8 @@ class ElasticsearchImporter(ElasticMixin, StoryWorker):
             mappings=es_mappings,
             settings=es_settings,
         )
+
+        self.output_msgs = self.args.output_msgs
 
     def index_routing(self, publication_date_str: Optional[str]) -> str:
         """
@@ -152,9 +161,9 @@ class ElasticsearchImporter(ElasticMixin, StoryWorker):
             }
             self.import_story(data)
 
-            # pass story along to archiver
-            # (have an option to disable, for previously archived data?)
-            sender.send_story(story)
+            # pass story along to archiver, unless disabled
+            if self.output_msgs:
+                sender.send_story(story)
 
     def import_story(
         self,
