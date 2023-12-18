@@ -38,13 +38,12 @@ class RSSHandler(xml.sax.ContentHandler):
         """
         text content inside current tag
         """
-        print("chars", self.tag, content)
         if self.in_item:
             # XXX strip+rstrip?
             if self.tag == "link":
-                self.link = content
+                self.link = content.strip()
             elif self.tag == "domain":
-                self.domain = content
+                self.domain = content.strip()
 
     def endElement(self, name):  # type: ignore[no-untyped-def]
         if self.in_item and name == "item":
