@@ -480,6 +480,7 @@ class Worker(QApp):
         """
 
         self._process_messages()
+        sys.exit(1)
 
     def _on_message(
         self,
@@ -525,9 +526,7 @@ class Worker(QApp):
         """
         Blocking loop for running Worker processing code.  Processes
         messages queued by _on_message (called from Pika thread).
-        _COULD_ run more than one thread processing messages, but
-        running multiple instances of the process is easier to see and
-        control.
+        _COULD_ run more than one thread processing messages!
         """
 
         while self._running:
@@ -537,7 +536,6 @@ class Worker(QApp):
 
             sys.stdout.flush()  # for redirection, supervisord
         logger.info("_process_messages exiting")
-        sys.exit(1)  # give error status so docker restarts
 
     def _process_one_message(self, im: InputMessage) -> bool:
         """

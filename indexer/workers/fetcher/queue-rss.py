@@ -72,11 +72,12 @@ class RSSQueuer(StoryProducer):
         assert self.args is not None
 
         fname = self.args.input_file
+        # XXX check for --yesterday, etc
         if not fname:
             raise RuntimeError("no input_file")
 
         # code here to fetch file via HTTP if needed,
-        # XXX does requests.Response make body available as an IO stream?
+        # NOTE! requests Response.raw is an I/O stream!!
 
         with open(fname, "rb") as f:
             self.parse_rss(f, fname)
@@ -91,6 +92,9 @@ class RSSQueuer(StoryProducer):
             self.parse_rss2(f)
 
     def parse_rss2(self, input: io.BufferedIOBase) -> None:
+        """
+        parse uncompressed input stream
+        """
         sender = self.story_sender()
 
         # XXX handle SAXParseException here, or pass error_handler=ErrorHandler
@@ -98,4 +102,4 @@ class RSSQueuer(StoryProducer):
 
 
 if __name__ == "__main__":
-    run(RSSQueuer, "queue_rss", "parse and queue rss-fetcher RSS entries")
+    run(RSSQueuer, "queue-rss", "parse and queue rss-fetcher RSS entries")
