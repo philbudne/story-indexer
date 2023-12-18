@@ -323,10 +323,16 @@ if __name__ == "__main__":
     # configure the default queues.
     p = Pipeline("pipeline", "configure story-indexer queues")
     p.add_producer(
-        "fetcher",
+        "queue-rss",
         [
             p.add_worker(
-                "parser", [p.add_worker("importer", [p.add_consumer("archiver")])]
+                "fetcher",
+                [
+                    p.add_worker(
+                        "parser",
+                        [p.add_worker("importer", [p.add_consumer("archiver")])],
+                    )
+                ],
             )
         ],
     )
