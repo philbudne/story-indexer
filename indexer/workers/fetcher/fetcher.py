@@ -48,7 +48,7 @@ from indexer.workers.fetcher.sched import ScoreBoard
 
 # internal scheduling:
 TOTAL_REQUESTS = 200  # equiv to 20 fetchers, with 10 active fetches
-MAX_PER_SLOT = 2  # concurrent connections per domain
+SLOT_REQUESTS = 2  # concurrent connections per domain
 MIN_SECONDS = 1.0  # interval between issues for a domain
 RETRY_SECONDS = 10 * MIN_SECONDS  # interval before re-issue after a failure
 
@@ -111,26 +111,26 @@ class Fetcher(IntervalMixin, Worker):
         self.scoreboard: Optional[ScoreBoard] = None
         self.previous_fragment = ""
         self.total_requests = TOTAL_REQUESTS
-        self.slot_requests = MAX_PER_SLOT
+        self.slot_requests = SLOT_REQUESTS
         self.thread_number = -1
 
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
-        ap.add_argument("input_file")
         ap.add_argument(
             "--slot-requests",
             "-S",
             type=int,
-            default=MAX_PER_SLOT,
-            help=f"requests/domain (default: {MAX_PER_SLOT}",
+            default=SLOT_REQUESTS,
+            help=f"requests/domain (default: {SLOT_REQUESTS})",
         )
         ap.add_argument(
             "--total-requests",
             "-T",
             type=int,
             default=TOTAL_REQUESTS,
-            help=f"total active requests (default: {TOTAL_REQUESTS}",
+            help=f"total active requests (default: {TOTAL_REQUESTS})",
         )
+        ap.add_argument("input_file")
 
     def _qos(self, chan: BlockingChannel) -> None:
         """
