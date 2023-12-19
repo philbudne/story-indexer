@@ -1,7 +1,7 @@
 """
 "Threaded Fetcher" using RabbitMQ
 
-NOTE! As of 2023 with CPython, the GIL (Global Interpreter Lock) means
+NOTE! As of 2023 with CPython, the Global Interpreter Lock (GIL) means
 that threads don't give greater concurrency than async (only one
 thread/task runs at a time), BUT PEP703 describes work in progress to
 eliminate the GIL, over time, enabling the code to run on multiple
@@ -12,11 +12,11 @@ import argparse
 import logging
 import threading
 import time
-from typing import Optional
+from typing import Any, List, Optional
 from urllib.parse import ParseResult, urlparse
 
-import mcmetadata.urls
 import requests
+from mcmetadata.urls import NON_NEWS_DOMAINS
 
 # PyPI
 from pika.adapters.blocking_connection import BlockingChannel
@@ -29,7 +29,7 @@ from indexer.worker import (
     CONSUMER_TIMEOUT_SECONDS,
     QuarantineException,
     StorySender,
-    Worker,
+    StoryWorker,
     run,
 )
 from indexer.workers.fetcher.sched import ScoreBoard
@@ -47,10 +47,11 @@ from indexer.workers.fetcher.sched import ScoreBoard
 
 
 # internal scheduling:
-TOTAL_REQUESTS = 200  # equiv to 20 fetchers, with 10 active fetches
+TOTAL_WORKERS = 200  # equiv to 20 fetchers, with 10 active fetches
 SLOT_REQUESTS = 2  # concurrent connections per domain
 MIN_SECONDS = 1.0  # interval between issues for a domain
-RETRY_SECONDS = 10 * MIN_SECONDS  # interval before re-issue after a failure
+RETRY_SECONDS = 10 * 60  # interval after connection failure
+MAX_HTML = 1000000
 
 # TCP connection timeouts:
 CONNECT_SECONDS = 30.0
@@ -74,8 +75,6 @@ assert (
 USER_AGENT = "mediacloud bot for open academic research (+https://mediacloud.org)"
 HEADERS = {"User-Agent": USER_AGENT}
 
-NON_NEWS_DOMAINS = set(mcmetadata.urls.NON_NEWS_DOMAINS)
-
 RETRY_HTTP_CODES = set(
     [
         408,  # Request Timeout
@@ -92,8 +91,8 @@ RETRY_HTTP_CODES = set(
 SEPARATE_COUNTS = set([403, 404, 429])
 
 # Possible polishing:
-# Keep requests context in slot to reuse connections?
-# Keep requests context per thread (using thread local storage)??
+# Keep requests Session in slot to reuse connections??
+# Keep requests Session per thread
 
 logger = logging.getLogger("fetcher")  # avoid __main__
 
@@ -104,15 +103,19 @@ class Retry(Exception):
     """
 
 
-class Fetcher(IntervalMixin, Worker):
+class Fetcher(IntervalMixin, StoryWorker):
     def __init__(self, process_name: str, descr: str):
         super().__init__(process_name, descr)
 
         self.scoreboard: Optional[ScoreBoard] = None
         self.previous_fragment = ""
-        self.total_requests = TOTAL_REQUESTS
+        self.total_workers = TOTAL_WORKERS
         self.slot_requests = SLOT_REQUESTS
-        self.thread_number = -1
+
+        # move to WorkerThreads mixin?
+        self.threads: List[threading.Thread] = []
+        self.tls = threading.local()  # thread local storage object
+        self.tls.thread_number = -1
 
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
@@ -124,14 +127,24 @@ class Fetcher(IntervalMixin, Worker):
             help=f"requests/domain (default: {SLOT_REQUESTS})",
         )
         ap.add_argument(
-            "--total-requests",
+            "--total-workers",
             "-T",
             type=int,
-            default=TOTAL_REQUESTS,
-            help=f"total active requests (default: {TOTAL_REQUESTS})",
+            default=TOTAL_WORKERS,
+            help=f"total active workers (default: {TOTAL_WORKERS})",
         )
-        ap.add_argument("input_file")
 
+    def process_args(self) -> None:
+        super().process_args()
+
+        assert self.args
+        self.total_workers = self.args.total_workers  # to WorkerThreads?
+        self.slot_requests = self.args.slot_requests
+        self.scoreboard = ScoreBoard(
+            self.total_workers, self.slot_requests, MIN_SECONDS, RETRY_SECONDS
+        )
+
+    # move to WorkerThreads mixin??
     def _qos(self, chan: BlockingChannel) -> None:
         """
         set "prefetch" limit: distributes messages among workers
@@ -139,42 +152,40 @@ class Fetcher(IntervalMixin, Worker):
         _message_queue
         """
         # single channel for all threads
-        chan.basic_qos(prefetch_count=self.total_requests * PREFETCH_MULTIPLIER)
+        chan.basic_qos(prefetch_count=self.total_workers * PREFETCH_MULTIPLIER)
 
+    # move to WorkerThreads mixin?
     def thread_body(self, thread_number: int) -> None:
-        self.thread_number = thread_number
+        self.tls.thread_number = thread_number
         # XXX catch exceptions??
         # XXX block signals?
         self._process_messages()
 
+    # move to WorkerThreads mixin?
+    def start_worker_threads(self, n: int) -> None:
+        for i in range(0, self.total_workers):
+            t = threading.Thread(
+                target=self.thread_body,
+                args=(i,),
+                name=f"worker {i}",
+            )
+            t.start()
+            self.threads.append(t)
+
+    def periodic(self) -> None:
+        if self.scoreboard:
+            self.scoreboard.status()
+        # XXX scan for dead threads?
+
+    # move to WorkerThreads?
     def main_loop(self) -> None:
-        assert self.args
-
-        self.total_requests = self.args.total_requests
-        self.slot_requests = self.args.slot_requests
-
-        self.scoreboard = ScoreBoard(
-            self.total_requests, self.slot_requests, MIN_SECONDS, RETRY_SECONDS
-        )
-
-        threads = []
         try:
-            for i in range(0, self.total_requests):
-                t = threading.Thread(
-                    target=self.thread_body,
-                    args=(i,),
-                    name=f"worker {i}",
-                )
-                t.start()
-                threads.append(t)
-
+            self.start_worker_threads(self.total_workers)
             while self._running:
-                self.scoreboard.status()
-                # XXX scan for dead threads?
+                self.periodic()
                 self.interval_sleep()
         finally:
-            self._running = False
-            # XXX may need to queue bogus work (a KOD) to wake up workers?
+            self.queue_kisses_of_death(self.total_workers)
             # logger.info("waiting for workers")
             # threading.join(*threads)
 
@@ -197,65 +208,70 @@ class Fetcher(IntervalMixin, Worker):
 
     def process_story(self, sender: StorySender, story: BaseStory) -> None:
         """
-        called from multiple worker threads
+        called from multiple worker threads!!
         """
         rss = story.rss_entry()
 
-        # XXX use LogAdapter to prefix all msgs w/ URL, thread number???
+        # XXX use LogAdapter to prefix all msgs w/ URL (or FQDN?), thread number???
 
         url = rss.link
         if not url:
             return self.quarantine("no-link")  # XXX discard?
-
-        domain = rss.domain
-        if not domain:
-            return self.quarantine("no-domain")  # XXX discard?
+        assert isinstance(url, str)
+        assert self.scoreboard is not None
 
         # XXX move inside redirect loop, and reissue against new domain??
         # (especially matters for news from aggregators)
         # if cannot issue for "next" domain, requeue with intermediate next???
-
-        assert self.scoreboard is not None
-        slot = self.scoreboard.issue(domain, url)
+        fqdn = url_fqdn(url)
+        slot = self.scoreboard.issue(fqdn, url)
         if slot is None:  # cannot be issued
             # XXX requeue for fast retry, without counting as an error
             raise Retry("cannot issue")  # XXX TEMP!!!
 
         redirects = 0
-        succ = False  # for retire
+        got_connection = False  # for retire
 
         # here with slot marked active
         try:  # call retire on exit
-            logger.info("%s: starting %s", url, domain)
+            logger.info("%s: starting", url)
 
             # loop following redirects
+            reqsess = requests.Session()  # get once, keep in tls?
             while True:
-                if domain in NON_NEWS_DOMAINS:
-                    return self.discard(url, "non-news")
+                for nnd in NON_NEWS_DOMAINS:
+                    if fqdn == nnd or fqdn.endswith("." + nnd):
+                        return self.discard(url, "non-news")
 
-                # let connection errors be handled by Worker class retries
-                resp = requests.get(
+                logger.info("================ %s", url)
+                # let connection error exceptions cause retries
+                got_connection = False
+                resp = reqsess.get(
                     url,
                     allow_redirects=False,
                     headers=HEADERS,
                     timeout=(CONNECT_SECONDS, READ_SECONDS),
                 )
+                got_connection = True
                 if not resp.is_redirect:
                     break
 
+                old_url = url
                 redirects += 1
                 if redirects >= MAX_REDIRECTS:
-                    return self.discard(url, "max-redirects")
-                old_url = url
-                parsed = self.handle_redirect(url, resp)
-                url = parsed.geturl()
+                    return self.discard(url, "maxredir")
+                nextreq = resp.next  # PreparedRequest
+                if nextreq:
+                    url = nextreq.url
+                else:
+                    url = ""
+                if not url or not isinstance(url, str):
+                    return self.discard(old_url, "badredir")
+                fqdn = url_fqdn(url)
                 logger.info("%s redirect (%d) to %s", old_url, resp.status_code, url)
                 resp.close()
-                # if getting new slot, extract fqdn!
-
-            succ = True
         finally:
-            slot.retire(succ)  # release slot
+            slot.retire(got_connection)  # release slot
 
         status = resp.status_code
         if status != 200:
@@ -272,7 +288,13 @@ class Fetcher(IntervalMixin, Worker):
             else:
                 return self.discard(url, counter)
 
-        # here with status == 200; pack up and queue
+        # here with status == 200
+        content = resp.content  # bytes
+        lcontent = len(content)
+        if lcontent > MAX_HTML:
+            return self.discard(url, "too-large")
+        logger.info("%s ======== length %d", url, lcontent)
+
         with story.http_metadata() as hmd:
             hmd.response_code = status
             hmd.final_url = resp.url
@@ -280,31 +302,25 @@ class Fetcher(IntervalMixin, Worker):
             hmd.fetch_timestamp = time.time()
 
         with story.raw_html() as rh:
-            rh.html = resp.content  # bytes
+            rh.html = content
             rh.encoding = resp.encoding
 
         sender.send_story(story)
 
-    # XXX pass pre-parsed old url?
-    def handle_redirect(self, url: str, resp: requests.Response) -> ParseResult:
-        # UGH! code lifted from requests.Session
-        try:
-            resp.content  # Consume socket data so it can be released
-        except (ChunkedEncodingError, ContentDecodingError, RuntimeError):
-            resp.raw.read(decode_content=False)
 
-        # Handle redirection without scheme (see: RFC 1808 Section 4)
-        if url.startswith("//"):
-            parsed_rurl = urlparse(resp.url)
-            url = ":".join([to_native_string(parsed_rurl.scheme), url])
-
-        # Normalize url case and attach previous fragment if needed (RFC 7231 7.1.2)
-        parsed = urlparse(url)
-        if parsed.fragment == "" and self.previous_fragment:
-            parsed = parsed._replace(fragment=self.previous_fragment)
-        elif parsed.fragment:
-            self.previous_fragment = parsed.fragment
-        return parsed
+def url_fqdn(url: str) -> str:
+    """
+    extract fully qualified domain name from url
+    """
+    purl = urlparse(url)
+    netloc = purl.netloc.lower()
+    # _could_ strip leading "www." (www.com loses)?
+    # BUT avoiding slow "canonical domain" extraction
+    # (does DNS lookups, and can treat big.com/foo and big.com/bar
+    # as different domains)
+    if ":" in netloc:
+        return purl.netloc.split(":", 1)[0]
+    return netloc
 
 
 if __name__ == "__main__":

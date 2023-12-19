@@ -471,7 +471,7 @@ class Worker(QApp):
 
     def __init__(self, process_name: str, descr: str):
         super().__init__(process_name, descr)
-        self._message_queue: queue.Queue[InputMessage] = queue.Queue()
+        self._message_queue: queue.Queue[Optional[InputMessage]] = queue.Queue()
 
     def main_loop(self) -> None:
         """
@@ -497,6 +497,16 @@ class Worker(QApp):
         im = InputMessage(chan, method, properties, body, time.monotonic())
         ptlogger.info("on_message tag #%s", method.delivery_tag)  # move to debug?
         self._message_queue.put(im)
+
+    # move to WorkerThreads mixin!
+    def queue_kisses_of_death(self, n: int) -> None:
+        """
+        for use when _process_message running in multiple
+        worker threads
+        """
+        self._running = False
+        for i in range(0, n):
+            self._message_queue.put(None)
 
     def _subscribe(self) -> None:
         """
@@ -531,11 +541,12 @@ class Worker(QApp):
 
         while self._running:
             im = self._message_queue.get()  # blocking
+            if im is None:
+                break
             self._process_one_message(im)
             self._ack_and_commit(im)
 
-            sys.stdout.flush()  # for redirection, supervisord
-        logger.info("_process_messages exiting")
+        logger.info("_process_messages returning")
 
     def _process_one_message(self, im: InputMessage) -> bool:
         """
@@ -800,6 +811,9 @@ class BatchStoryWorker(StoryWorker):
                 if msg_number == 1:
                     logger.info("waiting for first batch message")  # move to debug?
                     im = self._message_queue.get()  # blocking
+                    if im is None:
+                        logger.info("_process_messages returning 1")
+                        return
                     batch_start_time = time.monotonic()  # for logging
 
                     # base on when recieved from channel by Pika thread!!
@@ -815,6 +829,9 @@ class BatchStoryWorker(StoryWorker):
                             msg_number,
                         )
                         im = self._message_queue.get(timeout=timeout)
+                        if im is None:
+                            logger.info("_process_messages returning 2")
+                            return
                     except queue.Empty:
                         # exhausted the clock
                         break  # break batch loop
@@ -851,9 +868,7 @@ class BatchStoryWorker(StoryWorker):
             msg_number = 1
             msgs = []
 
-        sys.stdout.flush()  # for redirection, supervisord
-        logger.info("_process_messages exiting")
-        sys.exit(1)  # give error status so docker restarts
+        logger.info("_process_messages returning 3")
 
     def end_of_batch(self) -> None:
         raise NotImplementedError("BatchStoryWorker.end_of_batch not overridden")
