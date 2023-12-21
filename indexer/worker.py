@@ -138,6 +138,11 @@ def delay_queue_name(procname: str) -> str:
     return procname + "-delay"
 
 
+def fast_queue_name(procname: str) -> str:
+    """take process name, return fast delay queue name"""
+    return procname + "-fast"
+
+
 def base_queue_name(qname: str) -> str:
     """
     take a queue name, and return base (app) name
@@ -678,7 +683,7 @@ class Worker(QApp):
 
         logger.info(f"retry #{retries} failed: {headers[EXCEPTION_HDR]}")
 
-        # Queue message to -delay queue, which has no consumers with
+        # Queue message to -delay queue, which has no consumers, with
         # an expiration/TTL; when messages expire, they are routed
         # back to the -in queue via dead-letter-{exchange,routing-key}.
 

@@ -2,10 +2,10 @@
 "Threaded Fetcher" using RabbitMQ
 
 NOTE! As of 2023 with CPython, the Global Interpreter Lock (GIL) means
-that threads don't give greater concurrency than async (only one
-thread/task runs at a time), BUT PEP703 describes work in progress to
-eliminate the GIL, over time, enabling the code to run on multiple
-cores.
+that threads don't give greater concurrency than async/coroutines
+(only one thread/task runs at a time), BUT PEP703 describes work in
+progress to eliminate the GIL, over time, enabling the code to run on
+multiple cores.
 """
 
 import argparse
@@ -24,15 +24,17 @@ from requests.exceptions import ChunkedEncodingError, ContentDecodingError
 from requests.utils import to_native_string
 
 from indexer.app import IntervalMixin
-from indexer.story import BaseStory
+from indexer.story import MAX_HTML, BaseStory
 from indexer.worker import (
     CONSUMER_TIMEOUT_SECONDS,
+    DEFAULT_EXCHANGE,
     QuarantineException,
     StorySender,
     StoryWorker,
+    fast_queue_name,
     run,
 )
-from indexer.workers.fetcher.sched import ScoreBoard
+from indexer.workers.fetcher.sched import IssueStatus, ScoreBoard
 
 # _could_ try and map Slots by IP address(es), since THAT gets us closer
 # to the point (of not hammering a particular server),
@@ -50,8 +52,10 @@ from indexer.workers.fetcher.sched import ScoreBoard
 TOTAL_WORKERS = 200  # equiv to 20 fetchers, with 10 active fetches
 SLOT_REQUESTS = 2  # concurrent connections per domain
 MIN_SECONDS = 1.0  # interval between issues for a domain
-RETRY_SECONDS = 10 * 60  # interval after connection failure
-MAX_HTML = 1000000
+
+# time to consider a server bad after a connection failure
+# should NOT be larger than indexer.worker.RETRY_DELAY_MINUTES
+CONN_RETRY_SECONDS = 10 * 60
 
 # TCP connection timeouts:
 CONNECT_SECONDS = 30.0
@@ -112,6 +116,8 @@ class Fetcher(IntervalMixin, StoryWorker):
         self.total_workers = TOTAL_WORKERS
         self.slot_requests = SLOT_REQUESTS
 
+        self.fast_queue_name = fast_queue_name(process_name)
+
         # move to WorkerThreads mixin?
         self.threads: List[threading.Thread] = []
         self.tls = threading.local()  # thread local storage object
@@ -141,7 +147,7 @@ class Fetcher(IntervalMixin, StoryWorker):
         self.total_workers = self.args.total_workers  # to WorkerThreads?
         self.slot_requests = self.args.slot_requests
         self.scoreboard = ScoreBoard(
-            self.total_workers, self.slot_requests, MIN_SECONDS, RETRY_SECONDS
+            self.total_workers, self.slot_requests, MIN_SECONDS, CONN_RETRY_SECONDS
         )
 
     # move to WorkerThreads mixin??
@@ -224,10 +230,22 @@ class Fetcher(IntervalMixin, StoryWorker):
         # (especially matters for news from aggregators)
         # if cannot issue for "next" domain, requeue with intermediate next???
         fqdn = url_fqdn(url)
-        slot = self.scoreboard.issue(fqdn, url)
-        if slot is None:  # cannot be issued
-            # XXX requeue for fast retry, without counting as an error
-            raise Retry("cannot issue")  # XXX TEMP!!!
+        ir = self.scoreboard.issue(fqdn, url)
+        if ir.slot is None:  # could not be issued
+            # skipped due to recent connection error,
+            # treat as if we saw an error as well,
+            # so story doesn't linger in queue
+            if ir.status == IssueStatus.SKIPPED:
+                raise Retry("skipped")
+            else:
+                # here when "busy", one of:
+                # 1. total concurrecy limit
+                # 2. per-domain currency limit
+                # 3. per-domain issue interval
+                # requeue in short-delay queue, without counting as retry.
+                # NOTE! using sender means story is re-pickled
+                sender.send_story(story, DEFAULT_EXCHANGE, self.fast_queue_name)
+                return
 
         redirects = 0
         got_connection = False  # for retire
@@ -271,7 +289,7 @@ class Fetcher(IntervalMixin, StoryWorker):
                 logger.info("%s redirect (%d) to %s", old_url, resp.status_code, url)
                 resp.close()
         finally:
-            slot.retire(got_connection)  # release slot
+            ir.slot.retire(got_connection)  # release slot
 
         status = resp.status_code
         if status != 200:

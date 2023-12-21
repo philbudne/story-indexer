@@ -18,6 +18,8 @@ context management on each of those step datum, and a serialization scheme.
 Subclassable with hooks for different storage backends
 """
 
+MAX_HTML = 1000000  # largest valid HTML document
+
 
 def uuid_by_link(link: str) -> str:
     return uuid3(NAMESPACE_URL, link).hex

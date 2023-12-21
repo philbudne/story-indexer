@@ -28,6 +28,7 @@ from indexer.worker import (
     QApp,
     base_queue_name,
     delay_queue_name,
+    fast_queue_name,
     input_queue_name,
     output_exchange_name,
     quarantine_queue_name,
@@ -42,24 +43,33 @@ class PipelineError(RuntimeError):
     """Pipeline exception"""
 
 
-class Process:
+class _Process:
     """Virtual base class describing a pipeline process (producer, worker, consumer)"""
 
     def __init__(
-        self, pipeline: "Pipeline", name: str, consumer: bool, outputs: "Outputs"
+        self,
+        pipeline: "Pipeline",
+        name: str,
+        consumer: bool,
+        outputs: "Outputs",
+        fast_delay: bool = False,
     ):
         if name in pipeline.procs:
             raise PipelineError(f"process {name} is already defined")
 
+        if fast_delay and not consumer:
+            raise PipelineError(f"process {name} fast_delay but not consumer?")
+
         self.name: str = name
-        self.pipeline: "Pipeline" = pipeline
-        self.consumer: bool = consumer
+        self.pipeline = pipeline
+        self.consumer = consumer
         self.outputs = outputs
+        self.fast_delay = fast_delay
 
         pipeline.procs[name] = self
 
 
-class ProducerBase(Process):
+class _ProducerBase(_Process):
     """
     Base class for Process with outputs.
     NOT meant for direct use!
@@ -71,8 +81,9 @@ class ProducerBase(Process):
         name: str,
         consumer: bool,
         outputs: "Outputs",
+        fast_delay: bool = False,
     ):
-        super().__init__(pipeline, name, consumer, outputs)
+        super().__init__(pipeline, name, consumer, outputs, fast_delay)
         if len(outputs) == 0:
             raise PipelineError(f"{self.__class__.__name__} {name} has no outputs")
 
@@ -83,21 +94,27 @@ class ProducerBase(Process):
         self.outputs = outputs
 
 
-class Producer(ProducerBase):
+class Producer(_ProducerBase):
     """Process with outputs only"""
 
     def __init__(self, pipeline: "Pipeline", name: str, outputs: "Outputs"):
         super().__init__(pipeline, name, False, outputs)
 
 
-class Worker(ProducerBase):
+class Worker(_ProducerBase):
     """Process with inputs and output"""
 
-    def __init__(self, pipeline: "Pipeline", name: str, outputs: "Outputs"):
-        super().__init__(pipeline, name, True, outputs)
+    def __init__(
+        self,
+        pipeline: "Pipeline",
+        name: str,
+        outputs: "Outputs",
+        fast_delay: bool = False,
+    ):
+        super().__init__(pipeline, name, True, outputs, fast_delay)
 
 
-class Consumer(Process):
+class Consumer(_Process):
     """Process with inputs but no output"""
 
     def __init__(self, pipeline: "Pipeline", name: str):
@@ -121,7 +138,7 @@ class Pipeline(QApp):
     WAIT_FOR_QUEUE_CONFIGURATION = False
 
     def __init__(self, name: str, descr: str):
-        self.procs: Dict[str, Process] = {}
+        self.procs: Dict[str, _Process] = {}
         super().__init__(name, descr)
 
     #### QApp methods
@@ -143,8 +160,10 @@ class Pipeline(QApp):
         """Add a Process with no inputs"""
         return Producer(self, name, outputs)
 
-    def add_worker(self, name: str, outputs: Outputs) -> Worker:
-        return Worker(self, name, outputs)
+    def add_worker(
+        self, name: str, outputs: Outputs, fast_delay: bool = False
+    ) -> Worker:
+        return Worker(self, name, outputs, fast_delay)
 
     def add_consumer(self, name: str) -> Consumer:
         """Add a Process with no output"""
@@ -224,6 +243,8 @@ class Pipeline(QApp):
                 queue(input_queue_name(name))
                 queue(quarantine_queue_name(name))
                 queue(delay_queue_name(name), delay=True)
+                if proc.fast_delay:
+                    queue(fast_queue_name(name), delay=True)
 
             if proc.outputs:
                 ename = output_exchange_name(proc.name)
@@ -333,6 +354,7 @@ if __name__ == "__main__":
                         [p.add_worker("importer", [p.add_consumer("archiver")])],
                     )
                 ],
+                fast_delay=True,
             )
         ],
     )

@@ -11,7 +11,8 @@ import logging
 import math
 import threading
 import time
-from typing import Any, Dict, Optional
+from enum import Enum
+from typing import Any, Dict, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,16 @@ class Stopwatch:
         self.last = time.monotonic()
 
 
+class IssueStatus(Enum):
+    """
+    return value from Slot._issue
+    """
+
+    OK = 0  # slot assigned
+    BUSY = 1  # too many fetches active or too soon
+    SKIPPED = 2  # recent connection error
+
+
 class Slot:
     """
     A slot for a single id (eg domain) within a ScoreBoard
@@ -120,27 +131,28 @@ class Slot:
         self.last_issue = Stopwatch()
         self.last_conn_error = Stopwatch()
 
-    def _issue(self) -> bool:
+    def _issue(self) -> IssueStatus:
         """
         return True if safe to issue (must call "retire" after)
         return False if cannot be issued now
         """
         self.sb.big_lock.assert_held()
         if self.active >= self.sb.max_per_slot:
-            return False
-
-        # if recent error connecting, skip it to avoid waiting again
-        if self.last_conn_error.elapsed() < self.sb.conn_retry_seconds:
-            # failed recently
-            return False
+            return IssueStatus.BUSY
 
         if self.last_issue.elapsed() < self.sb.min_seconds:
             # issued recently
-            return False
+            return IssueStatus.BUSY
+
+        # see if connection to domain failed "recently".
+        # last test so that preference is short delay
+        # (and hope an active fetch succeeds).
+        if self.last_conn_error.elapsed() < self.sb.conn_retry_seconds:
+            return IssueStatus.SKIPPED
 
         self.active += 1
         self.last_issue.reset()
-        return True
+        return IssueStatus.OK
 
     def retire(self, got_connection: bool) -> None:
         """
@@ -153,6 +165,12 @@ class Slot:
                 self.last_conn_error.reset()
 
             self.sb._slot_retired()
+
+
+# status/value tuple: popular in GoLang
+class IssueReturn(NamedTuple):
+    status: IssueStatus
+    slot: Optional[Slot]  # if status == OK
 
 
 class ScoreBoard:
@@ -189,18 +207,18 @@ class ScoreBoard:
             slot = self.slots[id] = Slot(id, self)
         return slot
 
-    def issue(self, id: str, note: str) -> Optional[Slot]:
+    def issue(self, id: str, note: str) -> IssueReturn:
         with self.big_lock:
             if self.active < self.max_active:
                 slot = self._get_slot(id)
-                if slot._issue():
+                status = slot._issue()
+                if status == IssueStatus.OK:
                     # *MUST* call slot.retire() when done
                     self.active += 1
-                    return slot
-
-        # "more Pythonic" to raise Exception?
-        # but 3x slower, and fairly common
-        return None
+                    return IssueReturn(status, slot)
+            else:
+                status = IssueStatus.BUSY
+        return IssueReturn(status, None)
 
     def _slot_retired(self) -> None:
         """
