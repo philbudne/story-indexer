@@ -59,14 +59,14 @@ CONN_RETRY_SECONDS = 10 * 60
 
 # TCP connection timeouts:
 CONNECT_SECONDS = 30.0
-READ_SECONDS = 30.0  # fetch timeout
+READ_SECONDS = 30.0  # for each read?
 
 # HTTP parameters:
 MAX_REDIRECTS = 30
 AVG_REDIRECTS = 3
 
 # RabbitMQ:
-SHORT_DELAY = 5
+SHORT_DELAY_MS = 5000
 PREFETCH_MULTIPLIER = 2  # two per thread (one active, one on deck)
 
 # make sure not prefetching more than can be processed (worst case) per thread
@@ -244,7 +244,9 @@ class Fetcher(IntervalMixin, StoryWorker):
                 # 3. per-domain issue interval
                 # requeue in short-delay queue, without counting as retry.
                 # NOTE! using sender means story is re-pickled
-                sender.send_story(story, DEFAULT_EXCHANGE, self.fast_queue_name)
+                sender.send_story(
+                    story, DEFAULT_EXCHANGE, self.fast_queue_name, SHORT_DELAY_MS
+                )
                 return
 
         redirects = 0

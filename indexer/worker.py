@@ -102,8 +102,15 @@ class StorySender:
         story: BaseStory,
         exchange: Optional[str] = None,
         routing_key: str = DEFAULT_ROUTING_KEY,
+        expiration_ms: Optional[int] = None,
     ) -> None:
-        self.app._send_message(self._channel, story.dump(), exchange, routing_key)
+        if expiration_ms is not None:
+            props = BasicProperties(expiration=str(expiration_ms))
+        else:
+            props = None
+        self.app._send_message(
+            self._channel, story.dump(), exchange, routing_key, props
+        )
 
 
 # NOTE!! base_queue_name depends on the following
