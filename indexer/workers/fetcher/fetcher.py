@@ -1,3 +1,9 @@
+# XXX create LogAdapter, keep in tls????
+# XXX empty HTML check!
+# XXX align counter names w/ scrapy based fetcher!!!
+# XXX split out WorkerThreads mixin?
+# XXX send kiss of death when pika thread exits?!
+
 """
 "Threaded Fetcher" using RabbitMQ
 
@@ -51,13 +57,14 @@ from indexer.workers.fetcher.sched import IssueStatus, ScoreBoard
 # internal scheduling:
 TOTAL_WORKERS = 200  # equiv to 20 fetchers, with 10 active fetches
 SLOT_REQUESTS = 2  # concurrent connections per domain
-MIN_SECONDS = 1.0  # interval between issues for a domain
+MIN_SECONDS = 5.0  # interval between issues for a domain (5s = 12/min)
 
 # time to consider a server bad after a connection failure
 # should NOT be larger than indexer.worker.RETRY_DELAY_MINUTES
-CONN_RETRY_SECONDS = 10 * 60
+# (or else can be rejected twice before retrying)
+CONN_RETRY_MINUTES = 10
 
-# TCP connection timeouts:
+# requests timeouts:
 CONNECT_SECONDS = 30.0
 READ_SECONDS = 30.0  # for each read?
 
@@ -65,8 +72,8 @@ READ_SECONDS = 30.0  # for each read?
 MAX_REDIRECTS = 30
 AVG_REDIRECTS = 3
 
-# RabbitMQ:
-SHORT_DELAY_MS = 5000
+# RabbitMQ
+SHORT_DELAY_MS = int(MIN_SECONDS * 1000 + 100)
 PREFETCH_MULTIPLIER = 2  # two per thread (one active, one on deck)
 
 # make sure not prefetching more than can be processed (worst case) per thread
@@ -147,7 +154,7 @@ class Fetcher(IntervalMixin, StoryWorker):
         self.total_workers = self.args.total_workers  # to WorkerThreads?
         self.slot_requests = self.args.slot_requests
         self.scoreboard = ScoreBoard(
-            self.total_workers, self.slot_requests, MIN_SECONDS, CONN_RETRY_SECONDS
+            self.total_workers, self.slot_requests, MIN_SECONDS, CONN_RETRY_MINUTES * 60
         )
 
     # move to WorkerThreads mixin??
@@ -157,8 +164,9 @@ class Fetcher(IntervalMixin, StoryWorker):
         processes, limits the number of unacked messages put into
         _message_queue
         """
-        # single channel for all threads
-        chan.basic_qos(prefetch_count=self.total_workers * PREFETCH_MULTIPLIER)
+        # XXX maybe an increment rather than a multiplier??
+        count = int(self.total_workers * PREFETCH_MULTIPLIER)
+        chan.basic_qos(prefetch_count=count)
 
     # move to WorkerThreads mixin?
     def thread_body(self, thread_number: int) -> None:
@@ -166,6 +174,7 @@ class Fetcher(IntervalMixin, StoryWorker):
         # XXX catch exceptions??
         # XXX block signals?
         self._process_messages()
+        # XXX log @error? shutdown the whole process??
 
     # move to WorkerThreads mixin?
     def start_worker_threads(self, n: int) -> None:
@@ -233,9 +242,10 @@ class Fetcher(IntervalMixin, StoryWorker):
         ir = self.scoreboard.issue(fqdn, url)
         if ir.slot is None:  # could not be issued
             # skipped due to recent connection error,
-            # treat as if we saw an error as well,
-            # so story doesn't linger in queue
+            # treat as if we saw an error as well
             if ir.status == IssueStatus.SKIPPED:
+                logger.info("skipping %s", url)
+                # XXX counter?
                 raise Retry("skipped")
             else:
                 # here when "busy", one of:
@@ -244,6 +254,8 @@ class Fetcher(IntervalMixin, StoryWorker):
                 # 3. per-domain issue interval
                 # requeue in short-delay queue, without counting as retry.
                 # NOTE! using sender means story is re-pickled
+                logger.info("busy %s", url)
+                # XXX counter?
                 sender.send_story(
                     story, DEFAULT_EXCHANGE, self.fast_queue_name, SHORT_DELAY_MS
                 )
@@ -253,17 +265,17 @@ class Fetcher(IntervalMixin, StoryWorker):
         got_connection = False  # for retire
 
         # here with slot marked active
+        reqsess = requests.Session()
         try:  # call retire on exit
-            logger.info("%s: starting", url)
+            logger.info("starting %s", url)
 
             # loop following redirects
-            reqsess = requests.Session()  # get once, keep in tls?
             while True:
                 for nnd in NON_NEWS_DOMAINS:
                     if fqdn == nnd or fqdn.endswith("." + nnd):
                         return self.discard(url, "non-news")
 
-                logger.info("================ %s", url)
+                logger.info("getting %s", url)
                 # let connection error exceptions cause retries
                 got_connection = False
                 resp = reqsess.get(
@@ -288,10 +300,13 @@ class Fetcher(IntervalMixin, StoryWorker):
                 if not url or not isinstance(url, str):
                     return self.discard(old_url, "badredir")
                 fqdn = url_fqdn(url)
-                logger.info("%s redirect (%d) to %s", old_url, resp.status_code, url)
+                logger.info("redirect (%d) %s to %s", resp.status_code, old_url, url)
                 resp.close()
         finally:
             ir.slot.retire(got_connection)  # release slot
+            reqsess.close()
+
+        # XXX timing stat w/ redirect count?
 
         status = resp.status_code
         if status != 200:
@@ -311,8 +326,11 @@ class Fetcher(IntervalMixin, StoryWorker):
         # here with status == 200
         content = resp.content  # bytes
         lcontent = len(content)
+
+        # XXX check if empty
+
         if lcontent > MAX_HTML:
-            return self.discard(url, "too-large")
+            return self.discard(url, "too-large")  # XXX name
         logger.info("%s ======== length %d", url, lcontent)
 
         with story.http_metadata() as hmd:
