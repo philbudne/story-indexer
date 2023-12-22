@@ -20,9 +20,6 @@ from indexer import sentry
 
 Labels = List[Tuple[str, Any]]  # optional labels/values for a statistic report
 
-# format for stderr:
-FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-
 LEVEL_DEST = "log_level"  # args entry name!
 LEVELS = [level.lower() for level in logging._nameToLevel.keys()]
 LOGGER_LEVEL_SEP = ":"
@@ -47,11 +44,33 @@ class ArgsProtocol(Protocol):
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         ...
 
+    def process_args(self) -> None:
+        ...
+
 
 class App(ArgsProtocol):
     """
     Base class for command line applications (ie; Worker)
     """
+
+    # see https://docs.python.org/3/library/logging.html#logrecord-attributes
+    # for options in log formats.
+
+    # default formats for stderr:
+    STDERR_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    STDERR_FORMAT_THREADED = (
+        "%(asctime)s | %(levelname)s | %(name)s | %(threadName)s | %(message)s"
+    )
+
+    # look like syslog messages (except date format),
+    # adds levelname; does NOT include logger name, or pid:
+    SYSLOG_FORMAT = "%(asctime)s %(hostname)s %(app)s %(levelname)s: %(message)s"
+    # include thread, formatted as pid:
+    SYSLOG_FORMAT_THREADED = (
+        "%(asctime)s %(hostname)s %(app)s[%(threadName)s] %(levelname)s: %(message)s"
+    )
+
+    USE_THREADED_LOG_FORMAT = False
 
     def __init__(self, process_name: str, descr: str):
         self.process_name = process_name
@@ -115,6 +134,17 @@ class App(ArgsProtocol):
             metavar=f"LOGGER{LOGGER_LEVEL_SEP}LEVEL",
         )
 
+    def log_format(self, attr_base: str) -> str:
+        """
+        log format selection (threaded or vanilla)
+        """
+        attr_name = attr_base + "_FORMAT"
+        if self.USE_THREADED_LOG_FORMAT:
+            attr_name = attr_name + "_THREADED"
+        format = getattr(self, attr_name)
+        assert isinstance(format, str)
+        return format
+
     def process_args(self) -> None:
         """
         process arguments after parsing command line, but before main_loop.
@@ -141,7 +171,7 @@ class App(ArgsProtocol):
         # both stderr handler created by basicConfig.
         # _COULD_ apply to just stderr *handler* and
         # send everything to syslog handler.
-        logging.basicConfig(format=FORMAT, level=level)
+        logging.basicConfig(format=self.log_format("STDERR"), level=level)
 
         if self.args.logger_level:
             for ll in self.args.logger_level:
@@ -168,13 +198,12 @@ class App(ArgsProtocol):
                 "hostname": socket.gethostname(),  # without domain
                 "app": self.process_name,
             }
-            # look like syslog messages (except date format),
-            # adds levelname; does NOT include logger name, or pid:
-            fmt = "%(asctime)s %(hostname)s %(app)s %(levelname)s: %(message)s"
 
             # Might like default datefmt includes milliseconds
             # (which aren't otherwise available)
-            formatter = logging.Formatter(fmt=fmt, defaults=defaults)
+            formatter = logging.Formatter(
+                fmt=self.log_format("SYSLOG"), defaults=defaults
+            )
             handler.setFormatter(formatter)
 
             # add handler to root logger
@@ -389,11 +418,18 @@ class IntervalMixin(ArgsProtocol):
         time.sleep(sleep_sec)
 
 
+def run(klass: type[App], *args: Any, **kw: Any) -> None:
+    """
+    run app process
+    """
+    worker = klass(*args, **kw)
+    worker.main()
+
+
 if __name__ == "__main__":
 
     class Test(App):
         def main_loop(self) -> None:
             print("here")
 
-    t = Test("test", "test of app class")
-    t.main()
+    run(Test, "test", "test of app class")

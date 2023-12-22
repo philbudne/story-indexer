@@ -33,7 +33,7 @@ from pika.connection import URLParameters
 from pika.spec import PERSISTENT_DELIVERY_MODE, Basic
 
 # story-indexer
-from indexer.app import App, AppException
+from indexer.app import App, AppException, IntervalMixin, run
 from indexer.story import BaseStory
 
 logger = logging.getLogger(__name__)
@@ -54,10 +54,6 @@ _CONFIGURED_SEMAPHORE_EXCHANGE = "mc-configuration-semaphore"
 RETRIES_HDR = "x-mc-retries"
 EXCEPTION_HDR = "x-mc-what"
 
-# MAX_RETRIES * RETRY_DELAY_MINUTES determines how long stories will be retried
-# before quarantine:
-MAX_RETRIES = 10
-RETRY_DELAY_MINUTES = 60
 MS_PER_MINUTE = 60 * 1000
 
 
@@ -228,7 +224,14 @@ class QApp(App):
         self.output_exchange_name = output_exchange_name(self.process_name)
         self.delay_queue_name = delay_queue_name(self.process_name)
 
-        # avoid needing to create senders on the fly
+        # avoid needing to create senders on the fly.
+        # Stories MUST be forwarded on the same channel they
+        # came in on for transactions to quarantee atomic forward+ack.
+        # NOTE: Currently only subscribing (chan.basic_consume)
+        # on a single channel, but if you want to take input from
+        # multiple queues, with different qos/prefetch values,
+        # this would be necessary, so implement it now,
+        # and avoid possible (if unlikely) surprise later.
         self.senders: Dict[BlockingChannel, StorySender] = {}
 
     def define_options(self, ap: argparse.ArgumentParser) -> None:
@@ -341,7 +344,8 @@ class QApp(App):
         assert self.connection
 
         # need next check & _pika_thread set under a lock to allow
-        # calling from any thread:
+        # calling from any thread.  Multi-thread apps should
+        # call start_pika_thread before launching other threads.
         assert threading.current_thread() == threading.main_thread()
 
         if self._pika_thread:
@@ -367,6 +371,9 @@ class QApp(App):
         """
         Body for Pika-thread.  Processes all Pika I/O events.
 
+        Pika is not thread aware, so once started, the connection
+        is owned by this thread!!!
+
         ALL channel methods MUST be executed via
         self._call_in_pika_thread to run here.
         """
@@ -379,6 +386,13 @@ class QApp(App):
         try:
             # Timeout value means _running can be set to False and main thread
             # may have to wait for timeout before this thread wakes up and exits.
+
+            # _perhaps_ could avoid timeout by creating a temporary
+            # (durable=False, auto_delete=True) wakeup queue w/ a
+            # unique name (ie; hostname_pid_time or a GUID),
+            # subscribing to it, and to wake/kill this thread, queue a
+            # special KOD message (perhaps w/ a header with the queue
+            # name as the value) to the wakeup queue.
             while self._running and self.connection and self.connection.is_open:
                 # process_data_events is called by conn.sleep,
                 # but may return sooner:
@@ -397,13 +411,14 @@ class QApp(App):
     def _call_in_pika_thread(self, cb: Callable[[], None]) -> None:
         assert self.connection
 
-        # XXX this will need a lock if app runs in multiple threads
         if self._pika_thread is None:
             # here from a QApp
             # transactions will NOT be enabled
             # (unless _subscribe is overridden)
             self.start_pika_thread()
 
+        # NOTE! add_callback_threadsafe is documented (in the Pika
+        # 1.3.2 comments) as the ONLY thread-safe connection method!!!
         self.connection.add_callback_threadsafe(cb)
 
     def _stop_pika_thread(self) -> None:
@@ -479,6 +494,15 @@ class QApp(App):
 class Worker(QApp):
     """Base class for Workers that consume messages"""
 
+    # MAX_RETRIES * RETRY_DELAY_MINUTES determines how long stories will be retried
+    # before quarantine:
+    MAX_RETRIES = 10
+    RETRY_DELAY_MINUTES = 60
+
+    # Set to False to discard after MAX_RETRIES:
+    RETRY_QUARANTINE = True
+
+    # always start Pika thread:
     START_PIKA_THREAD = True
 
     def __init__(self, process_name: str, descr: str):
@@ -509,16 +533,6 @@ class Worker(QApp):
         im = InputMessage(chan, method, properties, body, time.monotonic())
         ptlogger.info("on_message tag #%s", method.delivery_tag)  # move to debug?
         self._message_queue.put(im)
-
-    # move to WorkerThreads mixin!
-    def queue_kisses_of_death(self, n: int) -> None:
-        """
-        for use when _process_message running in multiple
-        worker threads
-        """
-        self._running = False
-        for i in range(0, n):
-            self._message_queue.put(None)
 
     def _subscribe(self) -> None:
         """
@@ -679,8 +693,9 @@ class Worker(QApp):
         oh = im.properties.headers  # old headers
         if oh:
             retries = oh.get(RETRIES_HDR, 0)
-            if retries >= MAX_RETRIES:
-                self._quarantine(im, e)
+            if retries >= self.MAX_RETRIES:
+                if self.RETRY_QUARANTINE:
+                    self._quarantine(im, e)
                 return False  # retries exhausted
         else:
             retries = 0
@@ -693,13 +708,18 @@ class Worker(QApp):
         # Queue message to -delay queue, which has no consumers, with
         # an expiration/TTL; when messages expire, they are routed
         # back to the -in queue via dead-letter-{exchange,routing-key}.
-
+        #
         # Would like exponential backoff (BASE << retries),
         # but https://www.rabbitmq.com/ttl.html says:
         #    When setting per-message TTL expired messages can queue
         #    up behind non-expired ones until the latter are consumed
         #    or expired.
-        expiration_ms_str = str(int(RETRY_DELAY_MINUTES * MS_PER_MINUTE))
+        # ie; expiration only happens at head of queue (FIFO), and
+        # all messages must have uniform expiration.
+        #
+        # The alternative, the delayed-message-exchange plugin has many
+        # limitations (no clustering), and is not supported.
+        expiration_ms_str = str(int(self.RETRY_DELAY_MINUTES * MS_PER_MINUTE))
 
         # send to retry delay queue via default exchange
         props = BasicProperties(headers=headers, expiration=expiration_ms_str)
@@ -722,21 +742,22 @@ class Worker(QApp):
 
 class StoryProducer(QApp):
     """
-    QApp that sends stories
+    QApp that sends stories (w/o receiving any)
     """
 
     def story_sender(self) -> StorySender:
         """
-        MUST be called after qconnect, before Pika thread running
+        MUST be called after qconnect, but before Pika thread running
         """
         assert self.connection
+        # if pika thread running, it owns the connection:
         assert self._pika_thread is None
         return StorySender(self, self.connection.channel())
 
 
 class StoryWorker(Worker):
     """
-    Process Stories in Queue Messages
+    Mixin to Process Stories in Queue Messages
     """
 
     def process_message(self, im: InputMessage) -> None:
@@ -886,10 +907,91 @@ class BatchStoryWorker(StoryWorker):
         raise NotImplementedError("BatchStoryWorker.end_of_batch not overridden")
 
 
-def run(klass: type[App], *args: Any, **kw: Any) -> None:
-    """
-    run app process
-    could, in theory create threads or asyncio tasks.
-    """
-    worker = klass(*args, **kw)
-    worker.main()
+# Abstracted from multi-thread Fetcher, "just in case" it's useful
+# (and to hide ugly machinations).
+# Would have liked this to have been a mixin, independent of Story object,
+# but was too messy (hit on mypy MRO resolution issues?)
+class MultiThreadStoryWorker(IntervalMixin, StoryWorker):
+    USE_THREADED_LOG_FORMAT = True
+
+    # subclass must set value!
+    WORKER_THREADS_DEFAULT: int
+
+    PREFETCH_MULTIPLIER = 2
+
+    def __init__(self, process_name: str, descr: str):
+        super().__init__(process_name, descr)
+
+        self.workers = self.WORKER_THREADS_DEFAULT
+        self.threads: Dict[int, threading.Thread] = {}
+        self.tls = threading.local()  # thread local storage object
+        self.tls.thread_number = -1
+
+    def define_options(self, ap: argparse.ArgumentParser) -> None:
+        super().define_options(ap)
+        ap.add_argument(
+            "--worker-threads",
+            "-W",
+            type=int,
+            default=self.workers,
+            help=f"total active workers (default: {self.workers})",
+        )
+
+    def process_args(self) -> None:
+        super().process_args()
+
+        assert self.args
+        self.workers = self.args.worker_threads
+        assert self.workers > 0
+
+    def _qos(self, chan: BlockingChannel) -> None:
+        """
+        set "prefetch" limit: distributes messages among workers
+        processes, limits the number of unacked messages put into
+        _message_queue
+        """
+        # XXX maybe an increment rather than a multiplier??
+        count = int(self.workers * self.PREFETCH_MULTIPLIER)
+        chan.basic_qos(prefetch_count=count)
+
+    def _worker_thread(self, thread_number: int) -> None:
+        """
+        body for worker threads
+        """
+        self.tls.thread_number = thread_number
+        # XXX catch exceptions??
+        # XXX block signals?
+        self._process_messages()
+        # XXX log @error? shutdown the whole process??
+
+    def start_worker_threads(self) -> None:
+        for i in range(0, self.workers):
+            t = threading.Thread(
+                target=self._worker_thread,
+                args=(i,),
+                name=f"worker {i}",
+            )
+            t.start()
+            self.threads[i] = t
+
+    def queue_kisses_of_death(self) -> None:
+        self._running = False
+        for i in range(0, self.workers):
+            self._message_queue.put(None)
+
+    def periodic(self) -> None:
+        """
+        main thread loops in calling periodic at an interval
+        """
+        logger.debug("periodic wakeup")
+
+    def main_loop(self) -> None:
+        try:
+            self.start_worker_threads()
+            while self._running:
+                self.periodic()
+                self.interval_sleep()
+        finally:
+            self.queue_kisses_of_death()
+            # logger.info("waiting for workers")
+            # threading.join(*threads)

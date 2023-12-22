@@ -34,9 +34,9 @@ from indexer.story import MAX_HTML, BaseStory
 from indexer.worker import (
     CONSUMER_TIMEOUT_SECONDS,
     DEFAULT_EXCHANGE,
+    MultiThreadStoryWorker,
     QuarantineException,
     StorySender,
-    StoryWorker,
     fast_queue_name,
     run,
 )
@@ -55,7 +55,6 @@ from indexer.workers.fetcher.sched import IssueStatus, ScoreBoard
 
 
 # internal scheduling:
-TOTAL_WORKERS = 200  # equiv to 20 fetchers, with 10 active fetches
 SLOT_REQUESTS = 2  # concurrent connections per domain
 MIN_SECONDS = 5.0  # interval between issues for a domain (5s = 12/min)
 
@@ -114,21 +113,18 @@ class Retry(Exception):
     """
 
 
-class Fetcher(IntervalMixin, StoryWorker):
+class Fetcher(MultiThreadStoryWorker):
+    WORKER_THREADS_DEFAULT = 200  # equiv to 20 fetchers, with 10 active fetches
+
     def __init__(self, process_name: str, descr: str):
         super().__init__(process_name, descr)
 
         self.scoreboard: Optional[ScoreBoard] = None
         self.previous_fragment = ""
-        self.total_workers = TOTAL_WORKERS
         self.slot_requests = SLOT_REQUESTS
 
+        # maybe move to "FastRetryMixin"?
         self.fast_queue_name = fast_queue_name(process_name)
-
-        # move to WorkerThreads mixin?
-        self.threads: List[threading.Thread] = []
-        self.tls = threading.local()  # thread local storage object
-        self.tls.thread_number = -1
 
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
@@ -139,70 +135,23 @@ class Fetcher(IntervalMixin, StoryWorker):
             default=SLOT_REQUESTS,
             help=f"requests/domain (default: {SLOT_REQUESTS})",
         )
-        ap.add_argument(
-            "--total-workers",
-            "-T",
-            type=int,
-            default=TOTAL_WORKERS,
-            help=f"total active workers (default: {TOTAL_WORKERS})",
-        )
 
     def process_args(self) -> None:
         super().process_args()
 
         assert self.args
-        self.total_workers = self.args.total_workers  # to WorkerThreads?
         self.slot_requests = self.args.slot_requests
         self.scoreboard = ScoreBoard(
-            self.total_workers, self.slot_requests, MIN_SECONDS, CONN_RETRY_MINUTES * 60
+            self.workers, self.slot_requests, MIN_SECONDS, CONN_RETRY_MINUTES * 60
         )
 
-    # move to WorkerThreads mixin??
-    def _qos(self, chan: BlockingChannel) -> None:
-        """
-        set "prefetch" limit: distributes messages among workers
-        processes, limits the number of unacked messages put into
-        _message_queue
-        """
-        # XXX maybe an increment rather than a multiplier??
-        count = int(self.total_workers * PREFETCH_MULTIPLIER)
-        chan.basic_qos(prefetch_count=count)
-
-    # move to WorkerThreads mixin?
-    def thread_body(self, thread_number: int) -> None:
-        self.tls.thread_number = thread_number
-        # XXX catch exceptions??
-        # XXX block signals?
-        self._process_messages()
-        # XXX log @error? shutdown the whole process??
-
-    # move to WorkerThreads mixin?
-    def start_worker_threads(self, n: int) -> None:
-        for i in range(0, self.total_workers):
-            t = threading.Thread(
-                target=self.thread_body,
-                args=(i,),
-                name=f"worker {i}",
-            )
-            t.start()
-            self.threads.append(t)
-
     def periodic(self) -> None:
+        """
+        called from main_loop
+        """
         if self.scoreboard:
             self.scoreboard.status()
         # XXX scan for dead threads?
-
-    # move to WorkerThreads?
-    def main_loop(self) -> None:
-        try:
-            self.start_worker_threads(self.total_workers)
-            while self._running:
-                self.periodic()
-                self.interval_sleep()
-        finally:
-            self.queue_kisses_of_death(self.total_workers)
-            # logger.info("waiting for workers")
-            # threading.join(*threads)
 
     def count_story(self, status: str) -> None:
         """
@@ -241,21 +190,24 @@ class Fetcher(IntervalMixin, StoryWorker):
         fqdn = url_fqdn(url)
         ir = self.scoreboard.issue(fqdn, url)
         if ir.slot is None:  # could not be issued
-            # skipped due to recent connection error,
-            # treat as if we saw an error as well
             if ir.status == IssueStatus.SKIPPED:
+                # skipped due to recent connection error,
+                # treat as if we saw an error as well
                 logger.info("skipping %s", url)
                 # XXX counter?
-                raise Retry("skipped")
+                raise Retry("skipped due to recent connection failure")
             else:
                 # here when "busy", one of:
                 # 1. total concurrecy limit
                 # 2. per-domain currency limit
                 # 3. per-domain issue interval
                 # requeue in short-delay queue, without counting as retry.
-                # NOTE! using sender means story is re-pickled
                 logger.info("busy %s", url)
                 # XXX counter?
+
+                # NOTE! using sender means story is re-pickled
+                # maybe move to "FastRetryMixin" (not Story dependent)
+                # raise special Exception??
                 sender.send_story(
                     story, DEFAULT_EXCHANGE, self.fast_queue_name, SHORT_DELAY_MS
                 )
