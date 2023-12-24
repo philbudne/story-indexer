@@ -10,9 +10,14 @@ and/or --yesterday, dates, etc
 
 import argparse
 import gzip
+import html
 import io
 import logging
+import sys
+import time
 import xml.sax
+
+import requests
 
 from indexer.story import BaseStory, StoryFactory
 from indexer.worker import StoryProducer, StorySender, run
@@ -38,12 +43,13 @@ class RSSHandler(xml.sax.ContentHandler):
         """
         text content inside current tag
         """
+        # save channel.lastBuildDate for fetch date?
         if self.in_item:
-            # XXX strip+rstrip?
             if self.tag == "link":
-                self.link = content.strip()
+                self.link = html.unescape(content).strip()
             elif self.tag == "domain":
                 self.domain = content.strip()
+            # also pubDate, title
 
     def endElement(self, name):  # type: ignore[no-untyped-def]
         if self.in_item and name == "item":
@@ -52,6 +58,7 @@ class RSSHandler(xml.sax.ContentHandler):
                 with s.rss_entry() as rss:
                     rss.link = self.link
                     rss.domain = self.domain
+                    # also fetch_date, pub_date, title
                 self.story_sender.send_story(s)
                 logger.info("queued %s", self.link)
                 self.link = self.domain = ""
@@ -65,21 +72,41 @@ class RSSHandler(xml.sax.ContentHandler):
 class RSSQueuer(StoryProducer):
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
-        ap.add_argument("input_file")
+
+        # NOTE! rss-fetcher generates an RSS file for the previous UTC day
+        # by about 00:30 UTC
+        yesterday = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 24 * 60 * 60))
+
+        # need exactly one:
+        group = ap.add_mutually_exclusive_group(required=True)
+        group.add_argument("--fetch-date", "-D", help="Date (in YYYY-MM-DD) to fetch")
+        group.add_argument(
+            "--yesterday",
+            "-Y",
+            action="store_const",
+            const=yesterday,
+            dest="fetch_date",
+        )
+        group.add_argument("input_file", nargs="?", default=None)
 
     def main_loop(self) -> None:
         assert self.args is not None
 
         fname = self.args.input_file
-        # XXX check for --yesterday, etc
         if not fname:
-            raise RuntimeError("no input_file")
+            # XXX validate fetch_date?
+            fname = f"https://mediacloud-public.s3.amazonaws.com/backup-daily-rss/mc-{self.args.fetch_date}.rss.gz"
 
-        # code here to fetch file via HTTP if needed,
-        # NOTE! requests Response.raw is an I/O stream!!
-
-        with open(fname, "rb") as f:
-            self.parse_rss(f, fname)
+        if fname.startswith("http:") or fname.startswith("https:"):
+            logger.info("fetching %s", fname)
+            resp = requests.get(fname, stream=True, timeout=60)
+            if resp.status_code != 200:
+                logger.error("could not fetch %s", fname)
+                sys.exit(1)
+            self.parse_rss(resp.raw, fname)
+        else:
+            with open(fname, "rb") as f:
+                self.parse_rss(f, fname)
 
     def parse_rss(self, f: io.BufferedIOBase, fname: str) -> None:
         """
@@ -92,8 +119,9 @@ class RSSQueuer(StoryProducer):
 
     def parse_rss2(self, input: io.BufferedIOBase) -> None:
         """
-        parse uncompressed input stream
+        parse uncompressed input stream using RSSHandler (sends Stories)
         """
+
         sender = self.story_sender()
 
         # XXX handle SAXParseException here, or pass error_handler=ErrorHandler
