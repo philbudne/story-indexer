@@ -37,7 +37,6 @@ from indexer.app import App, AppException, IntervalMixin, run
 from indexer.story import BaseStory
 
 logger = logging.getLogger(__name__)
-ptlogger = logging.getLogger("Pika-thread")  # used for logging from Pika-thread
 
 DEFAULT_EXCHANGE = ""  # routes to queue named by routing key
 DEFAULT_ROUTING_KEY = "default"
@@ -55,6 +54,7 @@ RETRIES_HDR = "x-mc-retries"
 EXCEPTION_HDR = "x-mc-what"
 
 MS_PER_MINUTE = 60 * 1000
+SECONDS_PER_DAY = 24 * 60 * 60
 
 
 class QuarantineException(AppException):
@@ -353,7 +353,7 @@ class QApp(App):
             return
 
         self._pika_thread = threading.Thread(
-            target=self._pika_thread_body, name="Pika-thread", daemon=True
+            target=self._pika_thread_body, name="Pika", daemon=True
         )
         self._pika_thread.start()
 
@@ -377,36 +377,33 @@ class QApp(App):
         ALL channel methods MUST be executed via
         self._call_in_pika_thread to run here.
         """
-        ptlogger.info("Pika thread starting")
-
+        logger.info("Pika thread starting")
         # hook for Workers to make consume calls,
         # (and/or any blocking calls, like exchange/queue creation)
         self._subscribe()
 
         try:
-            # Timeout value means _running can be set to False and main thread
-            # may have to wait for timeout before this thread wakes up and exits.
-
-            # _perhaps_ could avoid timeout by creating a temporary
-            # (durable=False, auto_delete=True) wakeup queue w/ a
-            # unique name (ie; hostname_pid_time or a GUID),
-            # subscribing to it, and to wake/kill this thread, queue a
-            # special KOD message (perhaps w/ a header with the queue
-            # name as the value) to the wakeup queue.
             while self._running and self.connection and self.connection.is_open:
-                # process_data_events is called by conn.sleep,
-                # but may return sooner:
-                self.connection.process_data_events(10)
+                # add_callback_threadsafe will wake.
+                # Pika 1.3.2 sources accept None as an argument
+                # (block indefinitely), but types-pika 1.2.0b3 doesn't
+                # reflect that.
+                self.connection.process_data_events(SECONDS_PER_DAY)
         finally:
+            # tell _process_messages
+            # (some completed work won't be queued/acked)
+            # XXX race here still possible w/ _call_in_pika_thread?
+            self._running = False
+
             # Trying clean close, in case process_data_events returns
             # with unprocessed events (especially send callbacks).
             if self.connection and self.connection.is_open:
+                logger.info("closing Pika connection")
                 self.connection.close()
             self.connection = None
-            self._running = False  # tell _process_messages
 
             # here if _running was set False, connection closed, exception thrown
-            ptlogger.info("Pika thread exiting")
+            logger.info("Pika thread exiting")
 
     def _call_in_pika_thread(self, cb: Callable[[], None]) -> None:
         assert self.connection
@@ -416,6 +413,9 @@ class QApp(App):
             # transactions will NOT be enabled
             # (unless _subscribe is overridden)
             self.start_pika_thread()
+        elif not self._pika_thread.is_alive():
+            logger.info("Pika thread not running: %s", cb.__name__)
+            return
 
         # NOTE! add_callback_threadsafe is documented (in the Pika
         # 1.3.2 comments) as the ONLY thread-safe connection method!!!
@@ -427,9 +427,14 @@ class QApp(App):
                 self._running = False
                 # Log message in case Pika thread hangs.
                 logger.info("Waiting for Pika thread to exit")
+
+                def nop() -> None:
+                    logger.info("nop")
+
+                self._call_in_pika_thread(nop)
+
                 # could issue join with timeout.
                 self._pika_thread.join()
-            self._pika_thread = None
 
     def cleanup(self) -> None:
         super().cleanup()
@@ -464,7 +469,7 @@ class QApp(App):
         properties.delivery_mode = PERSISTENT_DELIVERY_MODE
 
         def sender() -> None:
-            ptlogger.debug(
+            logger.debug(
                 "send exch '%s' key '%s' %d bytes", exchange, routing_key, len(data)
             )
             chan.basic_publish(exchange, routing_key, data, properties)
@@ -531,7 +536,7 @@ class Worker(QApp):
         ack will be done back in Pika thread.
         """
         im = InputMessage(chan, method, properties, body, time.monotonic())
-        ptlogger.info("on_message tag #%s", method.delivery_tag)  # move to debug?
+        logger.info("on_message tag #%s", method.delivery_tag)  # move to debug?
         self._message_queue.put(im)
 
     def _subscribe(self) -> None:
@@ -623,7 +628,7 @@ class Worker(QApp):
         assert tag is not None
 
         def acker() -> None:
-            ptlogger.info("ack and commit #%s", tag)  # move to debug?
+            logger.info("ack and commit #%s", tag)  # move to debug?
 
             im.channel.basic_ack(delivery_tag=tag, multiple=multiple)
 
@@ -778,7 +783,8 @@ class StoryWorker(Worker):
 
 class BatchStoryWorker(StoryWorker):
     """
-    A worker processing batches of stories
+    A worker processing batches of stories for archiving
+    (all messages acked at end of processing)
     """
 
     # Default values: just guesses, should be tuned.
@@ -924,8 +930,9 @@ class MultiThreadStoryWorker(IntervalMixin, StoryWorker):
 
         self.workers = self.WORKER_THREADS_DEFAULT
         self.threads: Dict[int, threading.Thread] = {}
-        self.tls = threading.local()  # thread local storage object
-        self.tls.thread_number = -1
+        # self.tls = threading.local()  # thread local storage object
+
+        threading.main_thread().name = "Main"  # shorten name for logging
 
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
@@ -950,34 +957,36 @@ class MultiThreadStoryWorker(IntervalMixin, StoryWorker):
         processes, limits the number of unacked messages put into
         _message_queue
         """
-        # XXX maybe an increment rather than a multiplier??
-        count = int(self.workers * self.PREFETCH_MULTIPLIER)
-        chan.basic_qos(prefetch_count=count)
+        chan.basic_qos(prefetch_count=int(self.workers * self.PREFETCH_MULTIPLIER))
 
     def _worker_thread(self, thread_number: int) -> None:
         """
         body for worker threads
         """
-        self.tls.thread_number = thread_number
-        # XXX catch exceptions??
-        # XXX block signals?
         self._process_messages()
-        # XXX log @error? shutdown the whole process??
+        if self._running:
+            # XXX shut down whole process?
+            logger.error("_process_messages returned")
 
     def start_worker_threads(self) -> None:
         for i in range(0, self.workers):
             t = threading.Thread(
                 target=self._worker_thread,
                 args=(i,),
-                name=f"worker {i}",
+                name=f"W{i:03d}",  # same length as Pika/Main
+                daemon=True,
             )
             t.start()
             self.threads[i] = t
 
     def queue_kisses_of_death(self) -> None:
+        logger.info("queue_kisses_of_death")
         self._running = False
+
+        # wake up workers (in _process_messages)
         for i in range(0, self.workers):
             self._message_queue.put(None)
+        # XXX join worker threads?
 
     def periodic(self) -> None:
         """
@@ -993,5 +1002,6 @@ class MultiThreadStoryWorker(IntervalMixin, StoryWorker):
                 self.interval_sleep()
         finally:
             self.queue_kisses_of_death()
-            # logger.info("waiting for workers")
-            # threading.join(*threads)
+            # loop joining workers???
+        # return to main
+        # calls cleanup (pika_thread)

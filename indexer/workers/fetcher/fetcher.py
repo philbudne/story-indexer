@@ -1,7 +1,3 @@
-# XXX create LogAdapter, keep in tls????
-# XXX empty HTML check!
-# XXX align counter names w/ scrapy based fetcher!!!
-# XXX split out WorkerThreads mixin?
 # XXX send kiss of death when pika thread exits?!
 
 """
@@ -56,7 +52,7 @@ from indexer.workers.fetcher.sched import IssueStatus, ScoreBoard
 
 # internal scheduling:
 SLOT_REQUESTS = 2  # concurrent connections per domain
-MIN_SECONDS = 5.0  # interval between issues for a domain (5s = 12/min)
+DOMAIN_ISSUE_SECONDS = 5.0  # interval between issues for a domain (5s = 12/min)
 
 # time to consider a server bad after a connection failure
 # should NOT be larger than indexer.worker.RETRY_DELAY_MINUTES
@@ -72,7 +68,7 @@ MAX_REDIRECTS = 30
 AVG_REDIRECTS = 3
 
 # RabbitMQ
-SHORT_DELAY_MS = int(MIN_SECONDS * 1000 + 100)
+SHORT_DELAY_MS = int(DOMAIN_ISSUE_SECONDS * 1000 + 100)
 PREFETCH_MULTIPLIER = 2  # two per thread (one active, one on deck)
 
 # make sure not prefetching more than can be processed (worst case) per thread
@@ -107,6 +103,21 @@ SEPARATE_COUNTS = set([403, 404, 429])
 logger = logging.getLogger("fetcher")  # avoid __main__
 
 
+def url_fqdn(url: str) -> str:
+    """
+    extract fully qualified domain name from url
+    """
+    purl = urlparse(url)
+    netloc = purl.netloc.lower()
+    # _could_ strip leading "www." (www.com loses)?
+    # BUT avoiding slow "canonical domain" extraction
+    # (does DNS lookups, and can treat big.com/foo and big.com/bar
+    # as different domains)
+    if ":" in netloc:
+        return purl.netloc.split(":", 1)[0]
+    return netloc
+
+
 class Retry(Exception):
     """
     for explicit retries
@@ -116,18 +127,27 @@ class Retry(Exception):
 class Fetcher(MultiThreadStoryWorker):
     WORKER_THREADS_DEFAULT = 200  # equiv to 20 fetchers, with 10 active fetches
 
+    # discard messages after MAX_RETRIES
+    RETRY_QUARANTINE = False
+
     def __init__(self, process_name: str, descr: str):
         super().__init__(process_name, descr)
 
         self.scoreboard: Optional[ScoreBoard] = None
         self.previous_fragment = ""
-        self.slot_requests = SLOT_REQUESTS
 
         # maybe move to "FastRetryMixin"?
         self.fast_queue_name = fast_queue_name(process_name)
 
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
+        ap.add_argument(
+            "--issue-interval",
+            "-I",
+            type=int,
+            default=DOMAIN_ISSUE_SECONDS,
+            help=f"domain request interval (default: {DOMAIN_ISSUE_SECONDS})",
+        )
         ap.add_argument(
             "--slot-requests",
             "-S",
@@ -140,9 +160,11 @@ class Fetcher(MultiThreadStoryWorker):
         super().process_args()
 
         assert self.args
-        self.slot_requests = self.args.slot_requests
         self.scoreboard = ScoreBoard(
-            self.workers, self.slot_requests, MIN_SECONDS, CONN_RETRY_MINUTES * 60
+            self.workers,
+            self.args.slot_requests,
+            self.args.issue_interval,
+            CONN_RETRY_MINUTES * 60,
         )
 
     def periodic(self) -> None:
@@ -151,7 +173,6 @@ class Fetcher(MultiThreadStoryWorker):
         """
         if self.scoreboard:
             self.scoreboard.status()
-        # XXX scan for dead threads?
 
     def count_story(self, status: str) -> None:
         """
@@ -176,11 +197,9 @@ class Fetcher(MultiThreadStoryWorker):
         """
         rss = story.rss_entry()
 
-        # XXX use LogAdapter to prefix all msgs w/ URL (or FQDN?), thread number???
-
         url = rss.link
         if not url:
-            return self.quarantine("no-link")  # XXX discard?
+            return self.discard("", "no-url")
         assert isinstance(url, str)
         assert self.scoreboard is not None
 
@@ -193,7 +212,8 @@ class Fetcher(MultiThreadStoryWorker):
             if ir.status == IssueStatus.SKIPPED:
                 # skipped due to recent connection error,
                 # treat as if we saw an error as well
-                logger.info("skipping %s", url)
+                logger.info("skipped")
+                self.count_story("skipped")
                 # XXX counter?
                 raise Retry("skipped due to recent connection failure")
             else:
@@ -203,11 +223,8 @@ class Fetcher(MultiThreadStoryWorker):
                 # 3. per-domain issue interval
                 # requeue in short-delay queue, without counting as retry.
                 logger.info("busy %s", url)
-                # XXX counter?
-
+                self.count_story("busy")
                 # NOTE! using sender means story is re-pickled
-                # maybe move to "FastRetryMixin" (not Story dependent)
-                # raise special Exception??
                 sender.send_story(
                     story, DEFAULT_EXCHANGE, self.fast_queue_name, SHORT_DELAY_MS
                 )
@@ -217,7 +234,8 @@ class Fetcher(MultiThreadStoryWorker):
         got_connection = False  # for retire
 
         # here with slot marked active
-        reqsess = requests.Session()
+        sess = requests.Session()
+        resp = None
         try:  # call retire on exit
             logger.info("starting %s", url)
 
@@ -230,7 +248,7 @@ class Fetcher(MultiThreadStoryWorker):
                 logger.info("getting %s", url)
                 # let connection error exceptions cause retries
                 got_connection = False
-                resp = reqsess.get(
+                resp = sess.get(
                     url,
                     allow_redirects=False,
                     headers=HEADERS,
@@ -252,13 +270,16 @@ class Fetcher(MultiThreadStoryWorker):
                 if not url or not isinstance(url, str):
                     return self.discard(old_url, "badredir")
                 fqdn = url_fqdn(url)
-                logger.info("redirect (%d) %s to %s", resp.status_code, old_url, url)
+                logger.info("redirect (%d) => %s", resp.status_code, url)
+                # XXX need to discard data from connection before close?
                 resp.close()
         finally:
             ir.slot.retire(got_connection)  # release slot
-            reqsess.close()
-
-        # XXX timing stat w/ redirect count?
+            sess.close()
+            if not got_connection:
+                self.count_story("noconn")
+                # almost certainly here on exception
+                # want retry (return would discard)
 
         status = resp.status_code
         if status != 200:
@@ -279,11 +300,14 @@ class Fetcher(MultiThreadStoryWorker):
         content = resp.content  # bytes
         lcontent = len(content)
 
-        # XXX check if empty
+        # XXX timing stat w/ redirect count?
 
-        if lcontent > MAX_HTML:
-            return self.discard(url, "too-large")  # XXX name
-        logger.info("%s ======== length %d", url, lcontent)
+        logger.info("length %d", lcontent)
+
+        if lcontent == 0:
+            return self.discard(url, "no-html")
+        elif lcontent > MAX_HTML:
+            return self.discard(url, "oversized")
 
         with story.http_metadata() as hmd:
             hmd.response_code = status
@@ -296,21 +320,7 @@ class Fetcher(MultiThreadStoryWorker):
             rh.encoding = resp.encoding
 
         sender.send_story(story)
-
-
-def url_fqdn(url: str) -> str:
-    """
-    extract fully qualified domain name from url
-    """
-    purl = urlparse(url)
-    netloc = purl.netloc.lower()
-    # _could_ strip leading "www." (www.com loses)?
-    # BUT avoiding slow "canonical domain" extraction
-    # (does DNS lookups, and can treat big.com/foo and big.com/bar
-    # as different domains)
-    if ":" in netloc:
-        return purl.netloc.split(":", 1)[0]
-    return netloc
+        self.count_story("success")
 
 
 if __name__ == "__main__":

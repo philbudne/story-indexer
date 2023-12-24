@@ -129,6 +129,8 @@ class Slot:
 
         self.active = 0
         self.last_issue = Stopwatch()
+
+        # time since last error at this workplace
         self.last_conn_error = Stopwatch()
 
     def _issue(self) -> IssueStatus:
@@ -159,9 +161,9 @@ class Slot:
         called when a fetch attempt has ended
         """
         with self.sb.big_lock:
+            assert self.active > 0
             self.active -= 1
             if not got_connection:
-                # "zero seconds since last error at this workplace"
                 self.last_conn_error.reset()
 
             self.sb._slot_retired()
@@ -237,4 +239,4 @@ class ScoreBoard:
         # Perhaps delete slots that have been idle for a LONG time
         # so memory not occupied with slots from transient redirects.
         with self.big_lock:  # ensure consistent results (risk: could hang)
-            logger.info("%d slots, %d active", len(self.slots), self.active)
+            logger.info("%d domains seen; %d URLs active", len(self.slots), self.active)
