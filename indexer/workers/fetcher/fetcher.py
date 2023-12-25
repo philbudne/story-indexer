@@ -172,6 +172,8 @@ class Fetcher(MultiThreadStoryWorker):
         called from main_loop
         """
         if self.scoreboard:
+            # perhaps purge idle slots w/ last error more
+            # than CONN_RETRY_MINUTES ago once an hour?
             self.scoreboard.status()
 
     def count_story(self, status: str) -> None:
@@ -184,12 +186,12 @@ class Fetcher(MultiThreadStoryWorker):
         self.count_story(reason)
         raise QuarantineException(reason)
 
-    def discard(self, url: str, reason: str) -> None:
+    def discard(self, reason: str, msg: str) -> None:
         """
         drop story
         """
         self.count_story(reason)
-        logger.debug("%s: discard %s", url, reason)
+        logger.info("discard %s: %s", reason, msg)
 
     def process_story(self, sender: StorySender, story: BaseStory) -> None:
         """
@@ -199,7 +201,7 @@ class Fetcher(MultiThreadStoryWorker):
 
         url = rss.link
         if not url:
-            return self.discard("", "no-url")
+            return self.discard("no-url", "")
         assert isinstance(url, str)
         assert self.scoreboard is not None
 
@@ -207,7 +209,8 @@ class Fetcher(MultiThreadStoryWorker):
         # (especially matters for news from aggregators)
         # if cannot issue for "next" domain, requeue with intermediate next???
         fqdn = url_fqdn(url)
-        ir = self.scoreboard.issue(fqdn, url)
+        with self.timer("issue"):
+            ir = self.scoreboard.issue(fqdn, url)
         if ir.slot is None:  # could not be issued
             if ir.status == IssueStatus.SKIPPED:
                 # skipped due to recent connection error,
@@ -233,54 +236,57 @@ class Fetcher(MultiThreadStoryWorker):
         redirects = 0
         got_connection = False  # for retire
 
-        # here with slot marked active
-        sess = requests.Session()
-        resp = None
-        try:  # call retire on exit
-            logger.info("starting %s", url)
+        with self.timer("fetch"):
+            # log starting URL
+            logger.info("fetch %s", url)
 
-            # loop following redirects
-            while True:
-                for nnd in NON_NEWS_DOMAINS:
-                    if fqdn == nnd or fqdn.endswith("." + nnd):
-                        return self.discard(url, "non-news")
+            # here with slot marked active
+            sess = requests.Session()  # XXX keep in TLS?
+            resp = None
+            try:  # call retire on exit
+                # loop following redirects
+                while True:
+                    for nnd in NON_NEWS_DOMAINS:
+                        if fqdn == nnd or fqdn.endswith("." + nnd):
+                            return self.discard("non-news", url)
 
-                logger.info("getting %s", url)
-                # let connection error exceptions cause retries
-                got_connection = False
-                resp = sess.get(
-                    url,
-                    allow_redirects=False,
-                    headers=HEADERS,
-                    timeout=(CONNECT_SECONDS, READ_SECONDS),
-                )
-                got_connection = True
-                if not resp.is_redirect:
-                    break
+                    # let connection error exceptions cause retries
+                    got_connection = False
+                    with self.timer("get"):
+                        resp = sess.get(
+                            url,
+                            allow_redirects=False,
+                            headers=HEADERS,
+                            timeout=(CONNECT_SECONDS, READ_SECONDS),
+                            verify=False,  # raises connection rate
+                        )
+                    got_connection = True
+                    if not resp.is_redirect:
+                        break
 
-                old_url = url
-                redirects += 1
-                if redirects >= MAX_REDIRECTS:
-                    return self.discard(url, "maxredir")
-                nextreq = resp.next  # PreparedRequest
-                if nextreq:
-                    url = nextreq.url
-                else:
-                    url = ""
-                if not url or not isinstance(url, str):
-                    return self.discard(old_url, "badredir")
-                fqdn = url_fqdn(url)
-                logger.info("redirect (%d) => %s", resp.status_code, url)
-                # XXX need to discard data from connection before close?
-                resp.close()
-        finally:
-            ir.slot.retire(got_connection)  # release slot
-            sess.close()
-            if not got_connection:
-                self.count_story("noconn")
-                # almost certainly here on exception
-                # want retry (return would discard)
+                    redirects += 1
+                    if redirects >= MAX_REDIRECTS:
+                        return self.discard("maxredir", url)
+                    nextreq = resp.next  # PreparedRequest
+                    if nextreq:
+                        # maybe just use PreparedRequest in loop?
+                        url = nextreq.url
+                    else:
+                        url = ""
+                    if not url or not isinstance(url, str):
+                        return self.discard("badredir", repr(url))
+                    fqdn = url_fqdn(url)
+                    # NOTE: adding a counter here would count each story fetch attempt more than once
+                    logger.info("redirect (%d) => %s", resp.status_code, url)
+            finally:
+                ir.slot.retire(got_connection)  # release slot
+                sess.close()
+                if not got_connection:
+                    # here on Exception from "get"
+                    # want retry (return would discard)
+                    self.count_story("noconn")
 
+        # check resp is not None?
         status = resp.status_code
         if status != 200:
             if status in SEPARATE_COUNTS:
@@ -288,13 +294,12 @@ class Fetcher(MultiThreadStoryWorker):
             else:
                 counter = f"http-{status//100}xx"
 
+            msg = f"HTTP {status} {resp.reason}"
             if status in RETRY_HTTP_CODES:
                 self.count_story(counter)
-                reason = resp.reason
-                logger.info("%s: retry %d %s", url, status, reason)
-                raise Retry(f"HTTP {status} {reason}")
+                raise Retry(msg)
             else:
-                return self.discard(url, counter)
+                return self.discard(counter, msg)
 
         # here with status == 200
         content = resp.content  # bytes
@@ -305,21 +310,22 @@ class Fetcher(MultiThreadStoryWorker):
         logger.info("length %d", lcontent)
 
         if lcontent == 0:
-            return self.discard(url, "no-html")
+            return self.discard("no-html", url)
         elif lcontent > MAX_HTML:
-            return self.discard(url, "oversized")
+            return self.discard("oversized", url)
 
-        with story.http_metadata() as hmd:
-            hmd.response_code = status
-            hmd.final_url = resp.url
-            hmd.encoding = resp.encoding
-            hmd.fetch_timestamp = time.time()
+        with self.timer("queue"):
+            with story.http_metadata() as hmd:
+                hmd.response_code = status
+                hmd.final_url = resp.url
+                hmd.encoding = resp.encoding
+                hmd.fetch_timestamp = time.time()
 
-        with story.raw_html() as rh:
-            rh.html = content
-            rh.encoding = resp.encoding
+            with story.raw_html() as rh:
+                rh.html = content
+                rh.encoding = resp.encoding
 
-        sender.send_story(story)
+            sender.send_story(story)
         self.count_story("success")
 
 

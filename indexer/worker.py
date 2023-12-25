@@ -547,7 +547,7 @@ class Worker(QApp):
         ack will be done back in Pika thread.
         """
         im = InputMessage(chan, method, properties, body, time.monotonic())
-        logger.info("on_message tag #%s", method.delivery_tag)  # move to debug?
+        logger.debug("on_message tag #%s", method.delivery_tag)
         self._message_queue.put(im)
 
     def _subscribe(self) -> None:
@@ -596,7 +596,7 @@ class Worker(QApp):
         """
         tag = im.method.delivery_tag
         assert tag is not None
-        logger.info("_process_one_message #%s", tag)  # move to debug?
+        logger.debug("_process_one_message #%s", tag)
         t0 = time.monotonic()
         # XXX report t0-im.mtime as latency since message queued timing stat?
 
@@ -615,9 +615,7 @@ class Worker(QApp):
         ms = 1000 * (time.monotonic() - t0)
         # NOTE! statsd timers have .count but not .rate
         self.timing("message", ms, [("stat", status)])
-        logger.info(
-            "processed #%s in %.3f ms, status: %s", tag, ms, status
-        )  # move to debug?
+        logger.debug("processed #%s in %.3f ms, status: %s", tag, ms, status)
 
         return status == "ok"
 
@@ -639,7 +637,7 @@ class Worker(QApp):
         assert tag is not None
 
         def acker() -> None:
-            logger.info("ack and commit #%s", tag)  # move to debug?
+            logger.debug("ack and commit #%s", tag)
 
             im.channel.basic_ack(delivery_tag=tag, multiple=multiple)
 
@@ -859,7 +857,7 @@ class BatchStoryWorker(StoryWorker):
         while self._running:
             while msg_number <= batch_size:  # msg_number is one-based
                 if msg_number == 1:
-                    logger.info("waiting for first batch message")  # move to debug?
+                    logger.debug("waiting for first batch message")
                     im = self._message_queue.get()  # blocking
                     if im is None:
                         logger.info("_process_messages returning 1")
@@ -873,7 +871,7 @@ class BatchStoryWorker(StoryWorker):
                         timeout = batch_deadline - time.monotonic()
                         if timeout <= 0:
                             break  # time is up! break batch loop
-                        logger.info(  # move to debug?
+                        logger.debug(
                             "waiting %.3f seconds for batch message %d",
                             timeout,
                             msg_number,
