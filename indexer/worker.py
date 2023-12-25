@@ -419,6 +419,7 @@ class QApp(App):
                 # Log message in case Pika thread hangs.
                 logger.info("Waiting for Pika thread to exit")
 
+                # wake up Pika thread:
                 def nop() -> None:
                     logger.info("nop")
 

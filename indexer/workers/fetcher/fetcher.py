@@ -1,4 +1,5 @@
 # XXX send kiss of death when pika thread exits?!
+# XXX send gauge stats for URLs/domains active?
 
 """
 "Threaded Fetcher" using RabbitMQ
