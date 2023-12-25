@@ -26,8 +26,8 @@ from indexer.worker import (
     DEFAULT_EXCHANGE,
     MultiThreadStoryWorker,
     QuarantineException,
+    Requeue,
     StorySender,
-    fast_queue_name,
     run,
 )
 from indexer.workers.fetcher.sched import IssueStatus, ScoreBoard
@@ -62,7 +62,6 @@ MAX_REDIRECTS = 30
 AVG_REDIRECTS = 3
 
 # RabbitMQ
-SHORT_DELAY_MS = int(DOMAIN_ISSUE_SECONDS * 1000 + 100)
 PREFETCH_MULTIPLIER = 2  # two per thread (one active, one on deck)
 
 # make sure not prefetching more than can be processed (worst case) per thread
@@ -129,9 +128,6 @@ class Fetcher(MultiThreadStoryWorker):
 
         self.scoreboard: Optional[ScoreBoard] = None
         self.previous_fragment = ""
-
-        # maybe move to "FastRetryMixin"?
-        self.fast_queue_name = fast_queue_name(process_name)
 
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
@@ -221,11 +217,7 @@ class Fetcher(MultiThreadStoryWorker):
                 # requeue in short-delay queue, without counting as retry.
                 logger.info("busy %s", url)
                 self.count_story("busy")
-                # NOTE! using sender means story is re-pickled
-                sender.send_story(
-                    story, DEFAULT_EXCHANGE, self.fast_queue_name, SHORT_DELAY_MS
-                )
-                return
+                raise Requeue("busy")  # does not increment retry count
 
         redirects = 0
         got_connection = False  # for retire

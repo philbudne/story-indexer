@@ -67,6 +67,13 @@ class QuarantineException(AppException):
     """
 
 
+class Requeue(Exception):
+    """
+    Exception for Worker code to requeue message (preserving headers)
+    for QUICK reprocessing
+    """
+
+
 class InputMessage(NamedTuple):
     """
     would prefer _channel, but not allowed for NamedTuple,
@@ -223,6 +230,7 @@ class QApp(App):
         self.input_queue_name = input_queue_name(self.process_name)
         self.output_exchange_name = output_exchange_name(self.process_name)
         self.delay_queue_name = delay_queue_name(self.process_name)
+        self.fast_queue_name = fast_queue_name(self.process_name)
 
         # avoid needing to create senders on the fly.
         # Stories MUST be forwarded on the same channel they
@@ -495,6 +503,7 @@ class Worker(QApp):
     # before quarantine:
     MAX_RETRIES = 10
     RETRY_DELAY_MINUTES = 60
+    REQUEUE_DELAY_MINUTES = 1
 
     # Set to False to discard after MAX_RETRIES:
     RETRY_QUARANTINE = True
@@ -607,6 +616,9 @@ class Worker(QApp):
         except QuarantineException as e:
             status = "error"
             self._quarantine(im, e)
+        except Requeue as e:
+            status = "requeue"
+            self._requeue(im, e)
         except Exception as e:
             if self._retry(im, e):
                 status = "retry"
@@ -746,6 +758,28 @@ class Worker(QApp):
             props,
         )
         return True  # queued for retry
+
+    def _requeue(self, im: InputMessage, e: Exception) -> bool:
+        # Requeue message to -fast queue, which has no consumers, with
+        # an expiration/TTL; when messages expire, they are routed
+        # back to the -in queue via dead-letter-{exchange,routing-key}.
+
+        # NOTE! requires -fast queue to be created (fast=True in pipeline.py)
+        # preserves all headers (does not zero retry count)
+        expiration_ms_str = str(int(self.REQUEUE_DELAY_MINUTES * MS_PER_MINUTE))
+
+        # send to retry delay queue via default exchange
+        props = BasicProperties(
+            headers=im.properties.headers, expiration=expiration_ms_str
+        )
+        self._send_message(
+            im.channel,
+            im.body,
+            DEFAULT_EXCHANGE,
+            self.fast_queue_name,
+            props,
+        )
+        return True  # requeued
 
     def process_message(self, im: InputMessage) -> None:
         raise NotImplementedError("Worker.process_message not overridden")
