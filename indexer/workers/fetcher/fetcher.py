@@ -1,6 +1,6 @@
 # XXX send kiss of death when pika thread exits?!
 # XXX send gauge stats for URLs/domains active?
-
+# XXX remove slots when active==0 if no recent connect error
 """
 "Threaded Fetcher" using RabbitMQ
 
@@ -13,20 +13,13 @@ multiple cores.
 
 import argparse
 import logging
-import threading
 import time
-from typing import Any, List, Optional
+from typing import Optional
 from urllib.parse import ParseResult, urlparse
 
 import requests
 from mcmetadata.urls import NON_NEWS_DOMAINS
 
-# PyPI
-from pika.adapters.blocking_connection import BlockingChannel
-from requests.exceptions import ChunkedEncodingError, ContentDecodingError
-from requests.utils import to_native_string
-
-from indexer.app import IntervalMixin
 from indexer.story import MAX_HTML, BaseStory
 from indexer.worker import (
     CONSUMER_TIMEOUT_SECONDS,
