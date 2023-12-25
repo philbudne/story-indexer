@@ -209,7 +209,7 @@ class Fetcher(MultiThreadStoryWorker):
             if ir.status == IssueStatus.SKIPPED:
                 # skipped due to recent connection error,
                 # treat as if we saw an error as well
-                logger.info("skipped")
+                logger.info("skipped %s", url)
                 self.count_story("skipped")
                 # XXX counter?
                 raise Retry("skipped due to recent connection failure")
