@@ -35,6 +35,9 @@ from indexer.story import BaseStory
 
 logger = logging.getLogger(__name__)
 
+# for use w/ -L option
+msglogger = logging.getLogger(__name__ + ".msgs")  # input msgs
+
 DEFAULT_EXCHANGE = ""  # routes to queue named by routing key
 DEFAULT_ROUTING_KEY = "default"
 
@@ -417,6 +420,10 @@ class QApp(App):
         elif not self._pika_thread.is_alive():
             logger.info("Pika thread not running: %s", cb.__name__)
             return
+        elif not (self.connection and self.connection.is_open):
+            logger.info("No Pika connection: %s", cb.__name__)
+            return
+        # RACE HERE, but only on shutdown?
 
         # NOTE! add_callback_threadsafe is documented (in the Pika
         # 1.3.2 comments) as the ONLY thread-safe connection method!!!
@@ -560,7 +567,7 @@ class Worker(QApp):
         ack will be done back in Pika thread.
         """
         im = InputMessage(chan, method, properties, body, time.monotonic())
-        logger.debug("on_message tag #%s", method.delivery_tag)
+        msglogger.debug("on_message tag #%s", method.delivery_tag)
         self._message_queue.put(im)
 
     def _subscribe(self) -> None:
@@ -609,7 +616,7 @@ class Worker(QApp):
         """
         tag = im.method.delivery_tag
         assert tag is not None
-        logger.debug("_process_one_message #%s", tag)
+        msglogger.debug("_process_one_message #%s", tag)
         t0 = time.monotonic()
         # XXX report t0-im.mtime as latency since message queued timing stat?
 
@@ -634,7 +641,7 @@ class Worker(QApp):
         ms = 1000 * (time.monotonic() - t0)
         # NOTE! statsd timers have .count but not .rate
         self.timing("message", ms, [("stat", status)])
-        logger.debug("processed #%s in %.3f ms, status: %s", tag, ms, status)
+        msglogger.debug("processed #%s in %.3f ms, status: %s", tag, ms, status)
 
         return status == "ok"
 
@@ -656,7 +663,7 @@ class Worker(QApp):
         assert tag is not None
 
         def acker() -> None:
-            logger.debug("ack and commit #%s", tag)
+            msglogger.debug("ack and commit #%s", tag)
 
             im.channel.basic_ack(delivery_tag=tag, multiple=multiple)
 
@@ -721,6 +728,9 @@ class Worker(QApp):
         )
 
     def _retry(self, im: InputMessage, e: Exception) -> bool:
+        """
+        returns False if retries exhausted
+        """
         oh = im.properties.headers  # old headers
         if oh:
             retries = oh.get(RETRIES_HDR, 0)

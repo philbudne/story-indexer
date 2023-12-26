@@ -9,12 +9,16 @@ hides details of data structures and locking.
 
 import logging
 import math
+import random
 import threading
 import time
 from enum import Enum
-from typing import Any, Dict, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 from indexer.app import App
+
+# try issue twice, with small, random sleep in between
+SECOND_TRY = False
 
 logger = logging.getLogger(__name__)
 
@@ -84,16 +88,17 @@ class Lock:
 _NEVER = 0.0
 
 
-class Stopwatch:
+class Timer:
     """
     measure intervals; doesn't start ticking until reset called.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, duration: Optional[float]) -> None:
         """
         lock is container object lock (for asserts)
         """
         self.last = _NEVER
+        self.duration = duration
 
     def elapsed(self) -> float:
         """
@@ -108,6 +113,18 @@ class Stopwatch:
         (re)start from zero
         """
         self.last = time.monotonic()
+
+    def expired(self) -> bool:
+        return self.duration is not None and self.elapsed() >= self.duration
+
+    def __str__(self) -> str:
+        if self.last == _NEVER:
+            return "-"
+        if self.expired():
+            x = "*"
+        else:
+            x = ""
+        return f"{self.elapsed():.3f}{x}"
 
 
 class IssueStatus(Enum):
@@ -129,11 +146,15 @@ class Slot:
         self.slot_id = slot_id  # ie; domain
         self.sb = sb
 
-        self.active = 0
-        self.last_issue = Stopwatch()
+        self.active_count = 0
+        self.active_threads: List[str] = []
+        self.last_issue = Timer(sb.min_seconds)
 
         # time since last error at this workplace
-        self.last_conn_error = Stopwatch()
+        self.last_conn_error = Timer(sb.conn_retry_seconds)
+
+        # XXX *COULD* keep list of active threads
+        # (instead of active count)
 
     def _issue(self) -> IssueStatus:
         """
@@ -141,21 +162,23 @@ class Slot:
         return False if cannot be issued now
         """
         self.sb.big_lock.assert_held()
-        if self.active >= self.sb.max_per_slot:
+        if self.active_count >= self.sb.max_per_slot:
             return IssueStatus.BUSY
 
-        if self.last_issue.elapsed() < self.sb.min_seconds:
+        if not self.last_issue.expired():
             # issued recently
             return IssueStatus.BUSY
 
         # see if connection to domain failed "recently".
         # last test so that preference is short delay
         # (and hope an active fetch succeeds).
-        if self.last_conn_error.elapsed() < self.sb.conn_retry_seconds:
+        if not self.last_conn_error.expired():
             return IssueStatus.SKIPPED
 
-        self.active += 1
+        self.active_count += 1
         self.last_issue.reset()
+
+        self.active_threads.append(threading.current_thread().name)
         return IssueStatus.OK
 
     def retire(self, got_connection: bool) -> None:
@@ -163,13 +186,14 @@ class Slot:
         called when a fetch attempt has ended
         """
         with self.sb.big_lock:
-            assert self.active > 0
-            self.active -= 1
+            assert self.active_count > 0
+            self.active_count -= 1
+            self.active_threads.remove(threading.current_thread().name)  # O(n)
             if not got_connection:
                 self.last_conn_error.reset()
 
             # adjust scoreboard counters
-            self.sb._slot_retired(self.active == 0)
+            self.sb._slot_retired(self.active_count == 0)
 
             # consider removing idle slot if no bans in place
             self._consider_removing()
@@ -177,9 +201,9 @@ class Slot:
     def _consider_removing(self) -> None:
         self.sb.big_lock.assert_held()  # PARANOIA
         if (
-            self.active == 0
-            and self.last_issue.elapsed() >= self.sb.min_seconds
-            and self.last_conn_error.elapsed() >= self.sb.conn_retry_seconds
+            self.active_count == 0
+            and self.last_issue.expired()
+            and self.last_conn_error.expired()
         ):
             logger.debug("removing idle slot %s", self.slot_id)
             self.sb._remove_slot(self.slot_id)
@@ -191,6 +215,11 @@ class IssueReturn(NamedTuple):
     slot: Optional[Slot]  # if status == OK
 
 
+class ThreadStatus:
+    info: Optional[str]  # work info (URL or "idle")
+    ts: float  # time.monotonic
+
+
 class ScoreBoard:
     """
     keep score of active requests by "id" (str)
@@ -198,11 +227,13 @@ class ScoreBoard:
 
     def __init__(
         self,
+        app: App,  # for stats
         max_active: int,  # total concurrent active limit
         max_per_slot: int,  # max active with same id (domain)
         min_seconds: float,  # seconds between issues for slot
         conn_retry_seconds: float,  # seconds before connect retry
     ):
+        self.app = app
         # single lock, rather than one each for scoreboard, active count,
         # and each slot.  Time spent with lock held should be small,
         # and lock ordering issues likely to make code complex and fragile!
@@ -212,10 +243,12 @@ class ScoreBoard:
         self.max_per_slot = max_per_slot
         self.min_seconds = min_seconds
         self.conn_retry_seconds = conn_retry_seconds
-        self.slots: Dict[str, Slot] = {}
+        self.slots: Dict[str, Slot] = {}  # map "id" (domain) to Slot
         self.active_fetches = 0
         self.active_slots = 0
-        self.thread_status: Dict[str, Optional[str]] = {}
+
+        # map thread name to ThreadStatus
+        self.thread_status: Dict[str, ThreadStatus] = {}
 
     def _get_slot(self, slot_id: str) -> Slot:
         # _COULD_ try to use IP addresses to map to slots, BUT would
@@ -230,14 +263,14 @@ class ScoreBoard:
     def _remove_slot(self, slot_id: str) -> None:
         del self.slots[slot_id]
 
-    def issue(self, slot_id: str, note: str) -> IssueReturn:
+    def _issue(self, slot_id: str, note: str) -> IssueReturn:
         with self.big_lock:
             if self.active_fetches < self.max_active:
                 slot = self._get_slot(slot_id)
                 status = slot._issue()
                 if status == IssueStatus.OK:
                     # *MUST* call slot.retire() when done
-                    if slot.active == 1:  # was idle
+                    if slot.active_count == 1:  # was idle
                         self.active_slots += 1
                     self.active_fetches += 1
                     self._set_thread_status(note)  # full URL
@@ -245,6 +278,17 @@ class ScoreBoard:
             else:
                 status = IssueStatus.BUSY
         return IssueReturn(status, None)
+
+    def issue(self, slot_id: str, note: str) -> IssueReturn:
+        ir = self._issue(slot_id, note)
+        if ir.status == IssueStatus.BUSY and SECOND_TRY:
+            # experiment: wait a few seconds and try again,
+            # both to increase liklihood of issue,
+            # and to de-clump the queue:
+            # can't have different intervals in delay queue, so do it here:
+            time.sleep(5.0 * random.random() + 1)
+            ir = self._issue(slot_id, note)
+        return ir
 
     def _slot_retired(self, idle: bool) -> None:
         """
@@ -256,13 +300,19 @@ class ScoreBoard:
         if idle:
             assert self.active_slots > 0
             self.active_slots -= 1
-        self._set_thread_status("-")
+            # XXX _consider_removing
+        self._set_thread_status("idle")
 
     def _set_thread_status(self, info: str) -> None:
+        # no lock assert: only current thread can write it's own status item
         index = threading.current_thread().name
-        self.thread_status[index] = info
+        ts = self.thread_status.get(index, None)
+        if not ts:
+            ts = self.thread_status[index] = ThreadStatus()
+        ts.info = info
+        ts.ts = time.monotonic()
 
-    def status(self, app: App) -> None:
+    def periodic(self) -> None:
         """
         called periodically from main thread
         """
@@ -278,5 +328,29 @@ class ScoreBoard:
                 self.active_slots,
             )
 
-            app.gauge("active.fetches", self.active_fetches)
-            app.gauge("active.slots", self.active_slots)
+            self.app.gauge("active.fetches", self.active_fetches)
+            self.app.gauge("active.slots", self.active_slots)
+
+    def debug_info(self) -> None:
+        with self.big_lock:
+            logger.info(
+                "%d slots; %d URLs in %d domains active",
+                len(self.slots),
+                self.active_fetches,
+                self.active_slots,
+            )
+
+            now = time.monotonic()
+            for domain, slot in self.slots.items():
+                logger.info(
+                    "%s: %s last issue: %s last err: %s",
+                    domain,
+                    ",".join(slot.active_threads),
+                    slot.last_issue,
+                    slot.last_conn_error,
+                )
+
+            for name, ts in self.thread_status.items():
+                # by definition debug info, but only on request
+                # so try to avoid having it filtered out:
+                logger.info("%s: %.3f %s", name, now - ts.ts, ts.info)

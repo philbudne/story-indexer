@@ -13,7 +13,9 @@ multiple cores.
 
 import argparse
 import logging
+import signal
 import time
+from types import FrameType
 from typing import Optional
 from urllib.parse import ParseResult, urlparse
 
@@ -151,11 +153,19 @@ class Fetcher(MultiThreadStoryWorker):
 
         assert self.args
         self.scoreboard = ScoreBoard(
+            self,
             self.workers,
             self.args.slot_requests,
             self.args.issue_interval,
             CONN_RETRY_MINUTES * 60,
         )
+
+        # enable debug dump on SIGQUIT (CTRL-\)
+        def quit_handler(sig: int, frame: Optional[FrameType]) -> None:
+            if self.scoreboard:
+                self.scoreboard.debug_info()
+
+        signal.signal(signal.SIGQUIT, quit_handler)
 
     def periodic(self) -> None:
         """
@@ -163,7 +173,7 @@ class Fetcher(MultiThreadStoryWorker):
         """
         assert self.scoreboard
         with self.timer("status"):
-            self.scoreboard.status(self)
+            self.scoreboard.periodic()
 
     def count_story(self, status: str) -> None:
         """
@@ -218,10 +228,14 @@ class Fetcher(MultiThreadStoryWorker):
                 # In theory we have thirty minutes to ACK a message
                 # before RabbitMQ gets upset, so holding on to Stories
                 # that can't be processed immediately is possible, BUT
-                # the current API acks the message on return from process_message.
-                # Would need the delivery tag (or the whole InputMessage)
-                # in order to ACK a message ex post facto.
-                logger.info("busy %s", url)
+                # the current API acks the message on return from
+                # process_message.  Would need the delivery tag (or
+                # the whole InputMessage) in order to ACK a message ex
+                # post facto, ie; to replace process_message, or to
+                # change the process_story API (return False not to
+                # ACK the message)
+
+                logger.debug("busy %s", url)
                 self.count_story("busy")
                 raise Requeue("busy")  # does not increment retry count
 
