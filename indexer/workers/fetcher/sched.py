@@ -14,6 +14,8 @@ import time
 from enum import Enum
 from typing import Any, Dict, NamedTuple, Optional
 
+from indexer.app import App
+
 logger = logging.getLogger(__name__)
 
 
@@ -123,8 +125,8 @@ class Slot:
     A slot for a single id (eg domain) within a ScoreBoard
     """
 
-    def __init__(self, id: str, sb: "ScoreBoard"):
-        self.id = id  # ie; domain
+    def __init__(self, slot_id: str, sb: "ScoreBoard"):
+        self.slot_id = slot_id  # ie; domain
         self.sb = sb
 
         self.active = 0
@@ -166,7 +168,21 @@ class Slot:
             if not got_connection:
                 self.last_conn_error.reset()
 
-            self.sb._slot_retired()
+            # adjust scoreboard counters
+            self.sb._slot_retired(self.active == 0)
+
+            # consider removing idle slot if no bans in place
+            self._consider_removing()
+
+    def _consider_removing(self) -> None:
+        self.sb.big_lock.assert_held()  # PARANOIA
+        if (
+            self.active == 0
+            and self.last_issue.elapsed() >= self.sb.min_seconds
+            and self.last_conn_error.elapsed() >= self.sb.conn_retry_seconds
+        ):
+            logger.debug("removing idle slot %s", self.slot_id)
+            self.sb._remove_slot(self.slot_id)
 
 
 # status/value tuple: popular in GoLang
@@ -197,46 +213,70 @@ class ScoreBoard:
         self.min_seconds = min_seconds
         self.conn_retry_seconds = conn_retry_seconds
         self.slots: Dict[str, Slot] = {}
-        self.active = 0
+        self.active_fetches = 0
+        self.active_slots = 0
+        self.thread_status: Dict[str, Optional[str]] = {}
 
-    def _get_slot(self, id: str) -> Slot:
+    def _get_slot(self, slot_id: str) -> Slot:
         # _COULD_ try to use IP addresses to map to slots, BUT would
         # have to deal with multiple addrs per domain name and
         # possibility of non-overlapping sets from different fqdns
         self.big_lock.assert_held()  # PARANOIA
-        slot = self.slots.get(id, None)
+        slot = self.slots.get(slot_id, None)
         if not slot:
-            slot = self.slots[id] = Slot(id, self)
+            slot = self.slots[slot_id] = Slot(slot_id, self)
         return slot
 
-    def issue(self, id: str, note: str) -> IssueReturn:
+    def _remove_slot(self, slot_id: str) -> None:
+        del self.slots[slot_id]
+
+    def issue(self, slot_id: str, note: str) -> IssueReturn:
         with self.big_lock:
-            if self.active < self.max_active:
-                slot = self._get_slot(id)
+            if self.active_fetches < self.max_active:
+                slot = self._get_slot(slot_id)
                 status = slot._issue()
                 if status == IssueStatus.OK:
                     # *MUST* call slot.retire() when done
-                    self.active += 1
+                    if slot.active == 1:  # was idle
+                        self.active_slots += 1
+                    self.active_fetches += 1
+                    self._set_thread_status(note)  # full URL
                     return IssueReturn(status, slot)
             else:
                 status = IssueStatus.BUSY
         return IssueReturn(status, None)
 
-    def _slot_retired(self) -> None:
+    def _slot_retired(self, idle: bool) -> None:
         """
         here from slot.retired()
         """
         self.big_lock.assert_held()
-        assert self.active > 0
-        self.active -= 1
+        assert self.active_fetches > 0
+        self.active_fetches -= 1
+        if idle:
+            assert self.active_slots > 0
+            self.active_slots -= 1
+        self._set_thread_status("-")
 
-    def status(self) -> None:
+    def _set_thread_status(self, info: str) -> None:
+        index = threading.current_thread().name
+        self.thread_status[index] = info
+
+    def status(self, app: App) -> None:
         """
         called periodically from main thread
         """
-        # XXX if "reissue" done for each redirect step,
-        # will collect slots for intermediate fqdns.
-        # Perhaps delete slots that have been idle for a LONG time
-        # so memory not occupied with slots from transient redirects.
-        with self.big_lock:  # ensure consistent results (risk: could hang)
-            logger.info("%d domains seen; %d URLs active", len(self.slots), self.active)
+        with self.big_lock:
+            # do this less frequently?
+            for slot in list(self.slots.values()):
+                slot._consider_removing()
+
+            logger.info(
+                "%d slots; %d URLs in %d domains active",
+                len(self.slots),
+                self.active_fetches,
+                self.active_slots,
+            )
+
+            app.gauge("active.fetches", self.active_fetches)
+            app.gauge("active.slots", self.active_slots)

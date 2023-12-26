@@ -120,8 +120,8 @@ class Retry(Exception):
 class Fetcher(MultiThreadStoryWorker):
     WORKER_THREADS_DEFAULT = 200  # equiv to 20 fetchers, with 10 active fetches
 
-    # discard messages after MAX_RETRIES
-    RETRY_QUARANTINE = False
+    # Just discard stories after connection errors:
+    NO_QUARANTINE = (Retry, requests.exceptions.RequestException)
 
     def __init__(self, process_name: str, descr: str):
         super().__init__(process_name, descr)
@@ -161,10 +161,9 @@ class Fetcher(MultiThreadStoryWorker):
         """
         called from main_loop
         """
-        if self.scoreboard:
-            # perhaps purge idle slots w/ last error more
-            # than CONN_RETRY_MINUTES ago once an hour?
-            self.scoreboard.status()
+        assert self.scoreboard
+        with self.timer("status"):
+            self.scoreboard.status(self)
 
     def count_story(self, status: str) -> None:
         """
@@ -215,6 +214,13 @@ class Fetcher(MultiThreadStoryWorker):
                 # 2. per-domain currency limit
                 # 3. per-domain issue interval
                 # requeue in short-delay queue, without counting as retry.
+
+                # In theory we have thirty minutes to ACK a message
+                # before RabbitMQ gets upset, so holding on to Stories
+                # that can't be processed immediately is possible, BUT
+                # the current API acks the message on return from process_message.
+                # Would need the delivery tag (or the whole InputMessage)
+                # in order to ACK a message ex post facto.
                 logger.info("busy %s", url)
                 self.count_story("busy")
                 raise Requeue("busy")  # does not increment retry count

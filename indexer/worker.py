@@ -8,9 +8,6 @@ Pipeline Worker Definitions
 # * The code DOES assume there is only one Pika connection.
 # * For code processing messages: Pika ops MUST be done from Pika thread
 
-# log.debug calls w/ "move to debug?" comments
-# can be acted upon once the Pika-thread code is trusted.
-
 import argparse
 import logging
 import os
@@ -19,7 +16,7 @@ import queue
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, List, NamedTuple, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Type
 
 import pika.credentials
 import pika.exceptions
@@ -70,7 +67,9 @@ class QuarantineException(AppException):
 class Requeue(Exception):
     """
     Exception for Worker code to requeue message (preserving headers)
-    for QUICK reprocessing
+    for QUICK reprocessing.
+
+    Requires ...-fast queue to exist
     """
 
 
@@ -225,6 +224,9 @@ class QApp(App):
 
         self._pika_thread: Optional[threading.Thread] = None
         self._running = True
+
+        # debugging aid to use with --from-quarantine:
+        self._crash_on_exception = os.environ.get("WORKER_EXCEPTION_CRASH", "") != ""
 
         # queues/exchanges created using indexer.pipeline:
         self.input_queue_name = input_queue_name(self.process_name)
@@ -505,14 +507,15 @@ class Worker(QApp):
     RETRY_DELAY_MINUTES = 60
     REQUEUE_DELAY_MINUTES = 1
 
-    # Set to False to discard after MAX_RETRIES:
-    RETRY_QUARANTINE = True
+    # exception classes to discard instead of quarantine
+    NO_QUARANTINE: Tuple[Type[Exception], ...] = ()
 
     # always start Pika thread:
     START_PIKA_THREAD = True
 
     def __init__(self, process_name: str, descr: str):
         super().__init__(process_name, descr)
+        # Optional to allow None for kiss of death:
         self._message_queue: queue.Queue[Optional[InputMessage]] = queue.Queue()
 
         # queue created by indexer.pipeline:
@@ -620,6 +623,9 @@ class Worker(QApp):
             status = "requeue"
             self._requeue(im, e)
         except Exception as e:
+            if self._crash_on_exception:
+                raise
+
             if self._retry(im, e):
                 status = "retry"
             else:
@@ -715,13 +721,13 @@ class Worker(QApp):
         )
 
     def _retry(self, im: InputMessage, e: Exception) -> bool:
-        # XXX if debugging re-raise exception???
-
         oh = im.properties.headers  # old headers
         if oh:
             retries = oh.get(RETRIES_HDR, 0)
             if retries >= self.MAX_RETRIES:
-                if self.RETRY_QUARANTINE:
+                if isinstance(e, self.NO_QUARANTINE):
+                    logger.info("discard %r", e)  # TEMP: change to debug
+                else:
                     self._quarantine(im, e)
                 return False  # retries exhausted
         else:
@@ -760,15 +766,18 @@ class Worker(QApp):
         return True  # queued for retry
 
     def _requeue(self, im: InputMessage, e: Exception) -> bool:
+        # NOTE! requires -fast queue to be created (fast=True in pipeline.py)
+        # preserves all headers (does not zero retry count)
+        # move to a mixin???
+
+        # Does NOT count number of times requeued!
+
         # Requeue message to -fast queue, which has no consumers, with
         # an expiration/TTL; when messages expire, they are routed
         # back to the -in queue via dead-letter-{exchange,routing-key}.
-
-        # NOTE! requires -fast queue to be created (fast=True in pipeline.py)
-        # preserves all headers (does not zero retry count)
         expiration_ms_str = str(int(self.REQUEUE_DELAY_MINUTES * MS_PER_MINUTE))
 
-        # send to retry delay queue via default exchange
+        # send to fast retry queue via default exchange
         props = BasicProperties(
             headers=im.properties.headers, expiration=expiration_ms_str
         )
@@ -937,6 +946,9 @@ class BatchStoryWorker(StoryWorker):
                 with self.timer("batch"):
                     self.end_of_batch()
             except Exception as e:
+                if self._crash_on_exception:
+                    raise
+
                 # log as error, w/ exc_info=True?
                 logger.info("end_of_batch caught %r", e)
 
