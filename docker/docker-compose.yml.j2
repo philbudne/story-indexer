@@ -240,19 +240,29 @@ services:
       RUN: configure-pipeline
       ARGS: "configure_and_loop"
 
-  fetcher-worker:
+  queue-rss:
     <<: *worker-service-settings
     deploy:
       <<: *worker-deploy-settings
       labels:
-         swarm.cronjob.enable: "{{fetcher_cronjob_enable}}"
-         swarm.cronjob.schedule: "0 0 * * *"
-         swarm.cronjob.replicas: {{fetcher_num_batches}}
-      replicas: {{fetcher_num_batches}}
+         swarm.cronjob.enable: "{{queue_rss_cronjob_enable}}"
+         # rss-fetcher starts RSS file generation at 00:15 GMT
+         swarm.cronjob.schedule: "45 0 * * *"
+         swarm.cronjob.replicas: 1
+      replicas: {{queue_rss_replicas}}
+    environment:
+      <<: *worker-environment-vars
+      RUN: queue-rss
+      ARGS: "{{queue_rss_options}}"
+
+  # using threaded fetcher: only one replica!!!
+  fetcher-worker:
+    <<: *worker-service-settings
+    deploy:
+      <<: *worker-deploy-settings
     environment:
       <<: *worker-environment-vars
       RUN: fetcher
-      ARGS: "{{fetcher_options}} --num-batches={{fetcher_num_batches}} --batch-index={{ '{{.Task.Slot}}' }}"
 
   parser-worker:
     <<: *worker-service-settings

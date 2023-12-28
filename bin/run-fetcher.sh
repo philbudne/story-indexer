@@ -2,4 +2,4 @@
 
 . bin/func.sh
 
-run_python indexer.workers.fetcher.fetch_worker "$@"
+run_python indexer.workers.fetcher.fetcher "$@"
