@@ -108,16 +108,16 @@ ELASTICSEARCH_IMAGE="docker.elastic.co/elasticsearch/elasticsearch:8.8.0"
 ELASTICSEARCH_PORT_BASE=9200	# native port
 ELASTICSEARCH_SNAPSHOT_CRONJOB_ENABLE=false
 
-FETCHER_CRONJOB_ENABLE=true
-FETCHER_NUM_BATCHES=20
-FETCHER_OPTIONS="--yesterday"
-
 NEWS_SEARCH_API_PORT=8000	# native port
 NEWS_SEARCH_IMAGE_NAME=mcsystems/news-search-api
 NEWS_SEARCH_IMAGE_REGISTRY=docker.io/
 NEWS_SEARCH_IMAGE_TAG=v1.0.0b3
 NEWS_SEARCH_UI_PORT=8501	# server's native port
 NEWS_SEARCH_UI_TITLE="News Search Query" # Explorer currently appended
+
+QUEUE_RSS_CRONJOB_ENABLE=true
+QUEUE_RSS_OPTIONS="--yesterday"
+QUEUE_RSS_REPLICAS=0		# don't launch on stack deployment
 
 RABBITMQ_CONTAINERS=1		# integer to allow cluster in staging??
 RABBITMQ_PORT=5672		# native port
@@ -199,6 +199,7 @@ prod)
     ELASTICSEARCH_CONTAINERS=0
     # XXX change to 9200 once reconfigured:
     ELASTICSEARCH_HOSTS=http://ramos.angwin:9204,http://woodward.angwin:9200,http://bradley.angwin:9204
+    # configuration for new ES indices:
     ELASTICSEARCH_IMPORTER_REPLICAS=1
     ELASTICSEARCH_IMPORTER_SHARDS=30
 
@@ -222,9 +223,9 @@ staging)
     ELASTICSEARCH_IMPORTER_SHARDS=5
 
     # don't run daily, fetch 10x more than dev:
-    FETCHER_CRONJOB_ENABLE=false
-    FETCHER_OPTIONS="$FETCHER_OPTIONS --sample-size=50000"
-    FETCHER_NUM_BATCHES=10
+    QUEUE_RSS_CRONJOB_ENABLE=false
+    QUEUE_RSS_OPTIONS="$QUEUE_RSS_OPTIONS --sample-size=50000"
+    QUEUE_RSS_REPLICAS=1		# launch on stack deployment
 
     MULTI_NODE_DEPLOYMENT=1
     NEWS_SEARCH_UI_TITLE="Staging $NEWS_SEARCH_UI_TITLE"
@@ -242,9 +243,9 @@ dev)
     ELASTICSEARCH_IMPORTER_SHARDS=2
 
     # fetch limited articles under development, don't run daily:
-    FETCHER_CRONJOB_ENABLE=false
-    FETCHER_OPTIONS="$FETCHER_OPTIONS --sample-size=5000"
-    FETCHER_NUM_BATCHES=10
+    QUEUE_RSS_CRONJOB_ENABLE=false
+    QUEUE_RSS_OPTIONS="$QUEUE_RSS_OPTIONS --sample-size=5000"
+    QUEUE_RSS_REPLICAS=1		# launch on stack deployment
 
     MULTI_NODE_DEPLOYMENT=
     NEWS_SEARCH_UI_TITLE="$LOGIN_USER Development $NEWS_SEARCH_UI_TITLE"
@@ -421,14 +422,14 @@ if [ "$ELASTICSEARCH_CONTAINERS" -gt 0 ]; then
     add ELASTICSEARCH_PORT_BASE int
     add ELASTICSEARCH_NODES
 fi
-add FETCHER_CRONJOB_ENABLE	# NOT bool!
-add FETCHER_NUM_BATCHES int
-add FETCHER_OPTIONS
 add NETWORK_NAME
 add NEWS_SEARCH_API_PORT int
 add NEWS_SEARCH_IMAGE
 add NEWS_SEARCH_UI_PORT int
 add NEWS_SEARCH_UI_TITLE
+add QUEUE_RSS_CRONJOB_ENABLE	# NOT bool!
+add QUEUE_RSS_OPTIONS
+add QUEUE_RSS_REPLICAS int
 add RABBITMQ_CONTAINERS int
 add RABBITMQ_PORT int
 add RABBITMQ_URL
