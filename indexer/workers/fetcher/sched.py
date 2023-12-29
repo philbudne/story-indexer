@@ -321,13 +321,15 @@ class ScoreBoard:
             for slot in list(self.slots.values()):
                 slot._consider_removing()
 
+            recent = len(self.slots)
             logger.info(
-                "%d slots; %d URLs in %d domains active",
-                len(self.slots),
+                "%d recently active; %d URLs in %d domains active",
+                recent,
                 self.active_fetches,
                 self.active_slots,
             )
 
+            self.app.gauge("active.recent", recent)
             self.app.gauge("active.fetches", self.active_fetches)
             self.app.gauge("active.slots", self.active_slots)
 
