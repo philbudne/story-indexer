@@ -13,7 +13,7 @@ import random
 import threading
 import time
 from enum import Enum
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, NoReturn, Optional, Type
 
 from indexer.app import App
 
@@ -41,15 +41,22 @@ class LockHeldError(LockError):
     """
 
 
+class LockTimeout(LockError):
+    """
+    took too long to get lock
+    """
+
+
 class Lock:
     """
     wrapper for threading.Lock
     keeps track of thread that holds lock
     """
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, error_handler: Callable[[], None]):
         self.name = str
         self._lock = threading.Lock()
+        self._error_handler = error_handler
         self._owner: Optional[threading.Thread] = None
 
     def held(self) -> bool:
@@ -58,31 +65,31 @@ class Lock:
         """
         return self._owner is threading.current_thread()
 
-    def _assert(self, condition: bool) -> None:
-        assert condition  # XXX show thread & self.name!!
+    def _raise(self, exc_type: Type[LockError]) -> NoReturn:
+        """
+        here on fatal locking error
+        call error handler and raise exception
+        """
+        self._error_handler()
+        raise exc_type(self.name)
 
     def assert_held(self) -> None:
         if not self.held():
-            raise LockNotHeldError(self.name)
+            self._raise(LockNotHeldError)
 
     def assert_not_held(self) -> None:
         if self.held():
-            raise LockHeldError(self.name)
-
-    def acquire(self) -> None:
-        self.assert_not_held()  # non-recursive lock
-        self._lock.acquire()
-        self._owner = threading.current_thread()
-
-    def release(self) -> None:
-        self._owner = None
-        self._lock.release()
+            self._raise(LockHeldError)
 
     def __enter__(self) -> Any:
-        self.acquire()
+        self.assert_not_held()  # non-recursive lock
+        if not self._lock.acquire(timeout=120):
+            self._raise(LockTimeout)
+        self._owner = threading.current_thread()
 
     def __exit__(self, type: Any, value: Any, traceback: Any) -> None:
-        self.release()
+        self._owner = None
+        self._lock.release()
 
 
 _NEVER = 0.0
@@ -172,6 +179,7 @@ class Slot:
         # see if connection to domain failed "recently".
         # last test so that preference is short delay
         # (and hope an active fetch succeeds).
+        # XXX reconsider this to reduce fast traffic???
         if not self.last_conn_error.expired():
             return IssueStatus.SKIPPED
 
@@ -238,7 +246,7 @@ class ScoreBoard:
         # and each slot.  Time spent with lock held should be small,
         # and lock ordering issues likely to make code complex and fragile!
 
-        self.big_lock = Lock("big_lock")  # covers ALL variables!
+        self.big_lock = Lock("big_lock", self.debug_info)  # covers ALL variables!
         self.max_active = max_active
         self.max_per_slot = max_per_slot
         self.min_seconds = min_seconds
@@ -304,6 +312,9 @@ class ScoreBoard:
         self._set_thread_status("idle")
 
     def _set_thread_status(self, info: str) -> None:
+        """
+        save status for debug info
+        """
         # no lock assert: only current thread can write it's own status item
         index = threading.current_thread().name
         ts = self.thread_status.get(index, None)
@@ -334,25 +345,39 @@ class ScoreBoard:
             self.app.gauge("active.slots", self.active_slots)
 
     def debug_info(self) -> None:
-        with self.big_lock:
+        """
+        NOTE!!! called when lock attempt times out!
+        dumps info without attempting to get lock!
+        """
+        logger.info(
+            "%d slots; %d URLs in %d domains active",
+            len(self.slots),
+            self.active_fetches,
+            self.active_slots,
+        )
+
+        for domain, slot in self.slots.items():
             logger.info(
-                "%d slots; %d URLs in %d domains active",
-                len(self.slots),
-                self.active_fetches,
-                self.active_slots,
+                "%s: %s last issue: %s last err: %s",
+                domain,
+                ",".join(slot.active_threads),
+                slot.last_issue,
+                slot.last_conn_error,
             )
 
-            now = time.monotonic()
-            for domain, slot in self.slots.items():
-                logger.info(
-                    "%s: %s last issue: %s last err: %s",
-                    domain,
-                    ",".join(slot.active_threads),
-                    slot.last_issue,
-                    slot.last_conn_error,
-                )
+        # here without lock, so grab before examining:
+        lock_owner_thread = self.big_lock._owner
+        if lock_owner_thread:
+            lock_owner_name = lock_owner_thread.name
+        else:
+            lock_owner_name = "NONE"
 
-            for name, ts in self.thread_status.items():
-                # by definition debug info, but only on request
-                # so try to avoid having it filtered out:
-                logger.info("%s: %.3f %s", name, now - ts.ts, ts.info)
+        now = time.monotonic()
+        for name, ts in self.thread_status.items():
+            # by definition debug info, but only on request
+            # so try to avoid having it filtered out:
+            if name == lock_owner_name:
+                have_lock = "*"
+            else:
+                have_lock = " "
+            logger.info("%s%s %.3f %s", name, have_lock, now - ts.ts, ts.info)

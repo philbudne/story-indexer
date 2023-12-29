@@ -594,6 +594,7 @@ class Worker(QApp):
         set "prefetch" limit: distributes messages among workers
         processes, limits the number of unacked messages queued
         """
+        # double buffered: one to work on, one on deck
         chan.basic_qos(prefetch_count=2)
 
     def _process_messages(self) -> None:
@@ -893,6 +894,7 @@ class BatchStoryWorker(StoryWorker):
         processes, limits the number of unacked messages queued
         """
         assert self.args
+        # buffer exactly one full batch:
         chan.basic_qos(prefetch_count=self.args.batch_size)
 
     def _process_messages(self) -> None:
@@ -981,17 +983,23 @@ class BatchStoryWorker(StoryWorker):
         raise NotImplementedError("BatchStoryWorker.end_of_batch not overridden")
 
 
+# A StoryWorker that runs multiple threads processing Stories.
+# The subclass MUST use threading.Lock to ensure shared state
+# is accessed atomically!
+
 # Abstracted from multi-thread Fetcher, "just in case" it's useful
 # (and to hide ugly machinations).
+
+
 # Would have liked this to have been a mixin, independent of Story object,
 # but was too messy (hit on mypy MRO resolution issues?)
 class MultiThreadStoryWorker(IntervalMixin, StoryWorker):
+    # Include Thread.name in log messages:
     USE_THREADED_LOG_FORMAT = True
 
     # subclass must set value!
+    # (else will see AttributeError)
     WORKER_THREADS_DEFAULT: int
-
-    PREFETCH_MULTIPLIER = 2
 
     def __init__(self, process_name: str, descr: str):
         super().__init__(process_name, descr)
@@ -1025,29 +1033,29 @@ class MultiThreadStoryWorker(IntervalMixin, StoryWorker):
         processes, limits the number of unacked messages put into
         _message_queue
         """
-        chan.basic_qos(prefetch_count=int(self.workers * self.PREFETCH_MULTIPLIER))
+        # buffer one for each worker thread, and one to spare:
+        chan.basic_qos(prefetch_count=int(self.workers + 1))
 
-    def _worker_thread(self, thread_number: int) -> None:
+    def _worker_thread(self) -> None:
         """
         body for worker threads
         """
         self._process_messages()
         if self._running:
-            # XXX shut down whole process?
             logger.error("_process_messages returned")
+            self._running = False
 
-    def start_worker_threads(self) -> None:
+    def _start_worker_threads(self) -> None:
         for i in range(0, self.workers):
             t = threading.Thread(
                 target=self._worker_thread,
-                args=(i,),
                 name=f"W{i:03d}",  # same length as Pika/Main
                 daemon=True,
             )
             t.start()
             self.threads[i] = t
 
-    def queue_kisses_of_death(self) -> None:
+    def _queue_kisses_of_death(self) -> None:
         logger.info("queue_kisses_of_death")
         self._running = False
 
@@ -1064,12 +1072,12 @@ class MultiThreadStoryWorker(IntervalMixin, StoryWorker):
 
     def main_loop(self) -> None:
         try:
-            self.start_worker_threads()
+            self._start_worker_threads()
             while self._running:
                 self.periodic()
                 self.interval_sleep()
         finally:
-            self.queue_kisses_of_death()
+            self._queue_kisses_of_death()
             # loop joining workers???
-        # return to main
-        # calls cleanup (pika_thread)
+        # return to main, which
+        # calls cleanup for pika_thread.

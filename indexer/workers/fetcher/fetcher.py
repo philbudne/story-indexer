@@ -15,6 +15,20 @@ multiple cores.
 When a Story can't be fetched because of connect rate or concurrency
 limits, the Story is queued to a "fast delay" queue to avoid book keeping
 complexity (and having an API that allows not ACKing a message immediately).
+
+In theory we have thirty minutes to ACK a message
+before RabbitMQ has a fit (closes connection), so
+holding on to Stories that can't be processed
+immediately is POSSIBLE, *BUT* the current API acks
+the message on return from process_message.
+
+To delay ACK would need:
+1. A way to disable automatic ACK (ie; return False)
+2. Passing the delivery tag (or whole InputMessage - bleh) to process_story
+3. An "ack" method on the StorySender object.
+
+Handling retries (on connection errors) would either require
+re-pickling the Story, or the InputMessage
 """
 
 import argparse
@@ -23,7 +37,7 @@ import signal
 import time
 from types import FrameType
 from typing import Optional
-from urllib.parse import ParseResult, urlparse
+from urllib.parse import SplitResult, urlsplit
 
 import requests
 from mcmetadata.urls import NON_NEWS_DOMAINS
@@ -56,9 +70,7 @@ from indexer.workers.fetcher.sched import IssueStatus, ScoreBoard
 SLOT_REQUESTS = 2  # concurrent connections per domain
 DOMAIN_ISSUE_SECONDS = 5.0  # interval between issues for a domain (5s = 12/min)
 
-# time to consider a server bad after a connection failure
-# should NOT be larger than indexer.worker.RETRY_DELAY_MINUTES
-# (or else can be rejected twice before retrying)
+# time cache server as bad after a connection failure
 CONN_RETRY_MINUTES = 10
 
 # requests timeouts:
@@ -68,15 +80,6 @@ READ_SECONDS = 30.0  # for each read?
 # HTTP parameters:
 MAX_REDIRECTS = 30
 AVG_REDIRECTS = 3
-
-# RabbitMQ
-PREFETCH_MULTIPLIER = 2  # two per thread (one active, one on deck)
-
-# make sure not prefetching more than can be processed (worst case) per thread
-assert (
-    PREFETCH_MULTIPLIER * (CONNECT_SECONDS + READ_SECONDS) * AVG_REDIRECTS
-    < CONSUMER_TIMEOUT_SECONDS
-)
 
 # get from common place (with rss-fetcher)
 USER_AGENT = "mediacloud bot for open academic research (+https://mediacloud.org)"
@@ -115,15 +118,13 @@ def url_fqdn(url: str) -> str:
     """
     extract fully qualified domain name from url
     """
-    purl = urlparse(url)
-    netloc = purl.netloc.lower()
-    # _could_ strip leading "www." (www.com loses)?
-    # BUT avoiding slow "canonical domain" extraction
-    # (does DNS lookups, and can treat big.com/foo and big.com/bar
-    # as different domains)
-    if ":" in netloc:
-        return purl.netloc.split(":", 1)[0]
-    return netloc
+    # using urlsplit/SplitResult: parseurl calls spliturl and only
+    # adds ";params" handling and this code only cares about netinfo
+    surl = urlsplit(url, allow_fragments=False)
+    hn = surl.hostname
+    if not hn:
+        raise ValueError("bad hostname")
+    return hn.lower()
 
 
 class Retry(Exception):
@@ -164,6 +165,10 @@ class Fetcher(MultiThreadStoryWorker):
     def process_args(self) -> None:
         super().process_args()
 
+        # Make sure cannot attempt a URL twice
+        # using old status information:
+        assert CONN_RETRY_MINUTES < self.RETRY_DELAY_MINUTES
+
         assert self.args
         self.scoreboard = ScoreBoard(
             self,
@@ -173,8 +178,14 @@ class Fetcher(MultiThreadStoryWorker):
             CONN_RETRY_MINUTES * 60,
         )
 
-        # delay requests just enough:
-        self.set_requeue_delay_ms(1000 * self.args.issue_interval + 500)
+        # Unless the input RSS entries are well mixed (and this would
+        # not be the case if the rss-fetcher queued RSS entries to us
+        # directly), RSS entries for the same domain will travel in
+        # packs/clumps/trains.  If the "fast" delay is too long, that
+        # allows only one URL to be issued each time the train passes.
+        # So set the "fast" delay JUST long enough so they come back
+        # when intra-request issue interval has passed.
+        self.set_requeue_delay_ms(1000 * self.args.issue_interval)
 
         # enable debug dump on SIGQUIT (CTRL-\)
         def quit_handler(sig: int, frame: Optional[FrameType]) -> None:
@@ -209,9 +220,6 @@ class Fetcher(MultiThreadStoryWorker):
         self.count_story(reason)
         logger.info("discard %s: %s", reason, msg)
 
-    def non_news(self, url: str) -> None:
-        return self.discard("non-news", url)
-
     def process_story(self, sender: StorySender, story: BaseStory) -> None:
         """
         called from multiple worker threads!!
@@ -224,39 +232,35 @@ class Fetcher(MultiThreadStoryWorker):
         assert isinstance(url, str)
         assert self.scoreboard is not None
 
-        # XXX move inside redirect loop, and reissue against new domain??
-        # (especially matters for news from aggregators)
-        # if cannot issue for "next" domain, requeue with intermediate next???
-        fqdn = url_fqdn(url)
-        if non_news_domain(fqdn):
-            return self.non_news(url)
+        # XXX handle missing URL schema??
 
+        # Maybe move inside redirect loop, and reissue against new
+        # domain??  (especially matters for news from aggregators) if
+        # issue for "next" domain fails, requeue with intermediate
+        # next as place to continue???
+        fqdn = url_fqdn(url)  # XXX handle {Type,Value}Error?
+        if non_news_domain(fqdn):
+            return self.discard("non-news", url)
+
+        # report time to issue: if this jumps up, it's
+        # likely due to lock contention!
         with self.timer("issue"):
             ir = self.scoreboard.issue(fqdn, url)
+
         if ir.slot is None:  # could not be issued
             if ir.status == IssueStatus.SKIPPED:
-                # skipped due to recent connection error,
-                # treat as if we saw an error as well
+                # Skipped due to recent connection error: Treat as if
+                # we saw an error as well (incrementing retry count)
+                # rather than waiting 30 seconds for connection to fail.
                 logger.info("skipped %s", url)
                 self.count_story("skipped")
                 raise Retry("skipped due to recent connection failure")
             else:
-                # here when "busy", one of:
-                # 1. total concurrecy limit
-                # 2. per-domain currency limit
-                # 3. per-domain issue interval
+                # here when "busy", due to one of (in order of likelihood):
+                # 1. per-fqdn connect interval not reached
+                # 2. per-fqdn currency limit reached
+                # 3. total concurrecy limit reached.
                 # requeue in short-delay queue, without counting as retry.
-
-                # In theory we have thirty minutes to ACK a message
-                # before RabbitMQ gets upset, so holding on to Stories
-                # that can't be processed immediately is possible, BUT
-                # the current API acks the message on return from
-                # process_message.  Would need the delivery tag (or
-                # the whole InputMessage) in order to ACK a message ex
-                # post facto, ie; to replace process_message, or to
-                # change the process_story API (return False not to
-                # ACK the message)
-
                 logger.debug("busy %s", url)
                 self.count_story("busy")
                 raise Requeue("busy")  # does not increment retry count
@@ -275,11 +279,20 @@ class Fetcher(MultiThreadStoryWorker):
                 # loop following redirects
                 while True:
                     if non_news_domain(fqdn):
-                        return self.non_news(url)
+                        return self.discard("non-news2", url)
 
-                    # let connection error exceptions cause retries
+                    # Let connection error exceptions cause retries.
+                    # NOTE!!! Any return or exception without
+                    # got_connection set to True will increment the
+                    # "noconn" counter (due to try/finally), and each
+                    # Story fetch attempt should only be counted ONCE!
+                    # SO: if you increment another counter, and want
+                    # to return and discard the Story, you'll need to
+                    # set got_connection to True!
                     got_connection = False
-                    # XXX wrap in try; handle {Invalid,Missing}Schema, InvalidURL??
+
+                    # XXX wrap in try: treat {Invalid,Missing}Schema,
+                    # InvalidURL as fatal (discard or quarantine)??
                     with self.timer("get"):
                         resp = sess.get(
                             url,
@@ -292,6 +305,7 @@ class Fetcher(MultiThreadStoryWorker):
                     if not resp.is_redirect:
                         break
 
+                    # here with redirect:
                     redirects += 1
                     if redirects >= MAX_REDIRECTS:
                         return self.discard("maxredir", url)
@@ -303,9 +317,10 @@ class Fetcher(MultiThreadStoryWorker):
                         url = ""
                     if not url or not isinstance(url, str):
                         return self.discard("badredir", repr(url))
-                    fqdn = url_fqdn(url)
+                    fqdn = url_fqdn(url)  # XXX handle {Type,Value}Error?
                     # NOTE: adding a counter here would count each story fetch attempt more than once
                     logger.info("redirect (%d) => %s", resp.status_code, url)
+                # end redirect loop
             finally:
                 ir.slot.retire(got_connection)  # release slot
                 sess.close()
