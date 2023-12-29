@@ -6,7 +6,7 @@ fetches, un-gzips, parses XML, and queues on the fly (although
 shuffling the full list, or interleaving larger feeds might help the
 fetcher, and require reading it all before queuing anything).
 
-NOTE! --yesterday only valid after 03:00GMT!
+NOTE! --yesterday only valid after about 00:30 GMT (19:30EST 20:30EDT)
 """
 
 import argparse
@@ -121,9 +121,6 @@ class RSSQueuer(StoryProducer):
 
         self.sample_size: Optional[int] = None
         self.dry_run = False
-
-        # NOTE! rss-fetcher generates an RSS file for the previous UTC day
-        # by about 00:30 UTC, so --yesterday shouldnt be used between 00:00 and 00:30
         self.yesterday = time.strftime(
             "%Y-%m-%d", time.gmtime(time.time() - 24 * 60 * 60)
         )
