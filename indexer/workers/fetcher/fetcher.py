@@ -1,6 +1,8 @@
 # XXX send kiss of death when pika thread exits?!
 # XXX send gauge stats for URLs/domains active?
 # XXX remove slots when active==0 if no recent connect error
+# XXX handle missing URL schema?
+# XXX handle bad URLs: Quarantine??
 """
 "Threaded Fetcher" using RabbitMQ
 
@@ -9,6 +11,10 @@ that threads don't give greater concurrency than async/coroutines
 (only one thread/task runs at a time), BUT PEP703 describes work in
 progress to eliminate the GIL, over time, enabling the code to run on
 multiple cores.
+
+When a Story can't be fetched because of connect rate or concurrency
+limits, the Story is queued to a "fast delay" queue to avoid book keeping
+complexity (and having an API that allows not ACKing a message immediately).
 """
 
 import argparse
@@ -98,6 +104,13 @@ SEPARATE_COUNTS = set([403, 404, 429])
 logger = logging.getLogger("fetcher")  # avoid __main__
 
 
+def non_news_domain(fqdn: str) -> bool:
+    for nnd in NON_NEWS_DOMAINS:
+        if fqdn == nnd or fqdn.endswith("." + nnd):
+            return True
+    return False
+
+
 def url_fqdn(url: str) -> str:
     """
     extract fully qualified domain name from url
@@ -160,11 +173,15 @@ class Fetcher(MultiThreadStoryWorker):
             CONN_RETRY_MINUTES * 60,
         )
 
+        # delay requests just enough:
+        self.set_requeue_delay_ms(1000 * self.args.issue_interval + 500)
+
         # enable debug dump on SIGQUIT (CTRL-\)
         def quit_handler(sig: int, frame: Optional[FrameType]) -> None:
             if self.scoreboard:
                 self.scoreboard.debug_info()
 
+        # used to work, now dumping core on return
         signal.signal(signal.SIGQUIT, quit_handler)
 
     def periodic(self) -> None:
@@ -192,6 +209,9 @@ class Fetcher(MultiThreadStoryWorker):
         self.count_story(reason)
         logger.info("discard %s: %s", reason, msg)
 
+    def non_news(self, url: str) -> None:
+        return self.discard("non-news", url)
+
     def process_story(self, sender: StorySender, story: BaseStory) -> None:
         """
         called from multiple worker threads!!
@@ -208,6 +228,9 @@ class Fetcher(MultiThreadStoryWorker):
         # (especially matters for news from aggregators)
         # if cannot issue for "next" domain, requeue with intermediate next???
         fqdn = url_fqdn(url)
+        if non_news_domain(fqdn):
+            return self.non_news(url)
+
         with self.timer("issue"):
             ir = self.scoreboard.issue(fqdn, url)
         if ir.slot is None:  # could not be issued
@@ -216,7 +239,6 @@ class Fetcher(MultiThreadStoryWorker):
                 # treat as if we saw an error as well
                 logger.info("skipped %s", url)
                 self.count_story("skipped")
-                # XXX counter?
                 raise Retry("skipped due to recent connection failure")
             else:
                 # here when "busy", one of:
@@ -247,17 +269,17 @@ class Fetcher(MultiThreadStoryWorker):
             logger.info("fetch %s", url)
 
             # here with slot marked active
-            sess = requests.Session()  # XXX keep in TLS?
+            sess = requests.Session()
             resp = None
             try:  # call retire on exit
                 # loop following redirects
                 while True:
-                    for nnd in NON_NEWS_DOMAINS:
-                        if fqdn == nnd or fqdn.endswith("." + nnd):
-                            return self.discard("non-news", url)
+                    if non_news_domain(fqdn):
+                        return self.non_news(url)
 
                     # let connection error exceptions cause retries
                     got_connection = False
+                    # XXX wrap in try; handle {Invalid,Missing}Schema, InvalidURL??
                     with self.timer("get"):
                         resp = sess.get(
                             url,
@@ -311,9 +333,9 @@ class Fetcher(MultiThreadStoryWorker):
         content = resp.content  # bytes
         lcontent = len(content)
 
-        # XXX timing stat w/ redirect count?
+        # XXX report redirect count as a timing?
 
-        logger.info("length %d", lcontent)
+        logger.info("length %d", lcontent)  # XXX report ms?
 
         if lcontent == 0:
             return self.discard("no-html", url)
