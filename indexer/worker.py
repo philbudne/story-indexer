@@ -512,7 +512,7 @@ class Worker(QApp):
     # before quarantine:
     MAX_RETRIES = 10
     RETRY_DELAY_MINUTES = 60
-    REQUEUE_DELAY_MINUTES = 1
+    REQUEUE_DELAY_MS = 500
 
     # exception classes to discard instead of quarantine
     NO_QUARANTINE: Tuple[Type[Exception], ...] = ()
@@ -527,6 +527,8 @@ class Worker(QApp):
 
         # queue created by indexer.pipeline:
         self.input_queue_name = input_queue_name(self.process_name)
+
+        self.requeue_delay_str = str(int(self.REQUEUE_DELAY_MS))
 
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
@@ -775,6 +777,9 @@ class Worker(QApp):
         )
         return True  # queued for retry
 
+    def set_requeue_delay_ms(self, ms: int) -> None:
+        self.requeue_delay_str = str(int(ms))
+
     def _requeue(self, im: InputMessage, e: Exception) -> bool:
         # NOTE! requires -fast queue to be created (fast=True in pipeline.py)
         # preserves all headers (does not zero retry count)
@@ -785,11 +790,8 @@ class Worker(QApp):
         # Requeue message to -fast queue, which has no consumers, with
         # an expiration/TTL; when messages expire, they are routed
         # back to the -in queue via dead-letter-{exchange,routing-key}.
-        expiration_ms_str = str(int(self.REQUEUE_DELAY_MINUTES * MS_PER_MINUTE))
-
-        # send to fast retry queue via default exchange
         props = BasicProperties(
-            headers=im.properties.headers, expiration=expiration_ms_str
+            headers=im.properties.headers, expiration=self.requeue_delay_str
         )
         self._send_message(
             im.channel,
