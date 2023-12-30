@@ -246,8 +246,8 @@ services:
       <<: *worker-deploy-settings
       labels:
          swarm.cronjob.enable: "{{queue_rss_cronjob_enable}}"
-         # rss-fetcher starts RSS file generation at 00:15 GMT
-         swarm.cronjob.schedule: "45 0 * * *"
+         # rss-fetcher RSS output usually ready a little after 00:45 GMT
+         swarm.cronjob.schedule: "1 0 * * *"
          swarm.cronjob.replicas: 1
       replicas: {{queue_rss_replicas}}
     environment:
