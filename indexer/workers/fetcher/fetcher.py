@@ -223,11 +223,14 @@ class Fetcher(MultiThreadStoryWorker):
         redirects = 0
 
         # loop following redirects
+
+        request = requests.Request("GET", url)
+        prepreq = sess.prepare_request(request)
         while True:
             with self.timer("get"):  # time each HTTP get
                 try:
-                    resp = sess.get(
-                        url,
+                    resp = sess.send(
+                        prepreq,
                         allow_redirects=False,
                         headers=HEADERS,
                         timeout=(CONNECT_SECONDS, READ_SECONDS),
@@ -244,22 +247,25 @@ class Fetcher(MultiThreadStoryWorker):
             if not resp.is_redirect:
                 # here with a non-redirect HTTP response:
                 # it could be an HTTP error!
+
+                # XXX report redirect count as a timing?
                 return FetchReturn(resp, "SNH", False)
 
             # here with redirect:
-            nextreq = resp.next  # PreparedRequest
-            if nextreq and nextreq.url:
-                # maybe just use PreparedRequest in loop?
-                url = nextreq.url
+            nextreq = resp.next  # PreparedRequest | None
+            if nextreq:
+                url = prepreq.url or ""
+                prepreq = nextreq
             else:
                 url = ""
+
+            if not url:
+                return FetchReturn(None, "badredir", False)
 
             redirects += 1
             if redirects >= MAX_REDIRECTS:
                 return FetchReturn(None, "maxredir", False)
 
-            if not url or not isinstance(url, str):
-                return FetchReturn(None, "badredir", False)
             try:
                 fqdn = url_fqdn(url)
             except (TypeError, ValueError):
@@ -375,8 +381,6 @@ class Fetcher(MultiThreadStoryWorker):
         # here with status == 200
         content = resp.content  # bytes
         lcontent = len(content)
-
-        # XXX report redirect count as a timing?
 
         logger.info("length %d", lcontent)  # XXX report ms?
 
