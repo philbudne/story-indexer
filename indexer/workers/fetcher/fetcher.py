@@ -1,8 +1,7 @@
-# XXX send kiss of death when pika thread exits?!
-# XXX send gauge stats for URLs/domains active?
-# XXX remove slots when active==0 if no recent connect error
 # XXX handle missing URL schema?
-# XXX handle bad URLs: Quarantine??
+# XXX send timer stats for URLs/slots active???
+# XXX Quarantine bad URLs?
+# XXX send kisses of death when pika thread exits?!
 """
 "Threaded Fetcher" using RabbitMQ
 
@@ -54,18 +53,6 @@ from indexer.worker import (
     run,
 )
 from indexer.workers.fetcher.sched import IssueStatus, ScoreBoard
-
-# _could_ try and map Slots by IP address(es), since THAT gets us closer
-# to the point (of not hammering a particular server),
-#
-#   BUT: Would have to deal with:
-#   1. A particular FQDN may map to multiple IP addrs
-#   2. The order of the IP addreses might well change between queries
-#   3. The ENTIRE SET might change if a CDN is involved!
-#   4. Whether or not we're using IPv6 (if not, can ignore IPv6)
-#   5. IP addresses can serve multiple domains
-#   6. But domains in #5 might have disjoint IP addr sets.
-
 
 # internal scheduling:
 SLOT_REQUESTS = 2  # concurrent connections per domain
@@ -224,7 +211,7 @@ class Fetcher(MultiThreadStoryWorker):
 
         # loop following redirects
 
-        request = requests.Request("GET", url)
+        request = requests.Request("GET", url, headers=HEADERS)
         prepreq = sess.prepare_request(request)
         while True:
             with self.timer("get"):  # time each HTTP get
@@ -232,7 +219,6 @@ class Fetcher(MultiThreadStoryWorker):
                     resp = sess.send(
                         prepreq,
                         allow_redirects=False,
-                        headers=HEADERS,
                         timeout=(CONNECT_SECONDS, READ_SECONDS),
                         verify=False,  # raises connection rate
                     )

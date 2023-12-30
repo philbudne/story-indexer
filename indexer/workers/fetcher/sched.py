@@ -23,6 +23,18 @@ SECOND_TRY = False
 logger = logging.getLogger(__name__)
 
 
+# _could_ try and map Slots by IP address(es), since THAT gets us closer
+# to the point (of not hammering a particular server),
+#
+#   BUT: Would have to deal with:
+#   1. A particular FQDN may map to multiple IP addrs
+#   2. The order of the IP addreses might well change between queries
+#   3. The ENTIRE SET might change if a CDN is involved!
+#   4. Whether or not we're using IPv6 (if not, can ignore IPv6)
+#   5. IP addresses can serve multiple domains
+#   6. But domains in #5 might have disjoint IP addr sets.
+
+
 class LockError(RuntimeError):
     """
     base class for locking exceptions
