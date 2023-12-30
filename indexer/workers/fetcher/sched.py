@@ -128,7 +128,7 @@ class Timer:
         if self.last == _NEVER:
             return "-"
         if self.expired():
-            x = "*"
+            x = "+"
         else:
             x = ""
         return f"{self.elapsed():.3f}{x}"
@@ -246,7 +246,9 @@ class ScoreBoard:
         # and each slot.  Time spent with lock held should be small,
         # and lock ordering issues likely to make code complex and fragile!
 
-        self.big_lock = Lock("big_lock", self.debug_info)  # covers ALL variables!
+        self.big_lock = Lock(
+            "big_lock", self.debug_info_nolock
+        )  # covers ALL variables!
         self.max_active = max_active
         self.max_per_slot = max_per_slot
         self.min_seconds = min_seconds
@@ -344,7 +346,7 @@ class ScoreBoard:
             self.app.gauge("active.fetches", self.active_fetches)
             self.app.gauge("active.slots", self.active_slots)
 
-    def debug_info(self) -> None:
+    def debug_info_nolock(self) -> None:
         """
         NOTE!!! called when lock attempt times out!
         dumps info without attempting to get lock!
@@ -356,7 +358,7 @@ class ScoreBoard:
             self.active_slots,
         )
 
-        for domain, slot in self.slots.items():
+        for domain, slot in list(self.slots.items()):
             logger.info(
                 "%s: %s last issue: %s last err: %s",
                 domain,
@@ -373,7 +375,7 @@ class ScoreBoard:
             lock_owner_name = "NONE"
 
         now = time.monotonic()
-        for name, ts in self.thread_status.items():
+        for name, ts in list(self.thread_status.items()):
             # by definition debug info, but only on request
             # so try to avoid having it filtered out:
             if name == lock_owner_name:

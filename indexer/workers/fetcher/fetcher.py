@@ -36,11 +36,12 @@ import logging
 import signal
 import time
 from types import FrameType
-from typing import Optional
+from typing import NamedTuple, Optional
 from urllib.parse import SplitResult, urlsplit
 
 import requests
 from mcmetadata.urls import NON_NEWS_DOMAINS
+from requests.exceptions import ConnectionError
 
 from indexer.story import MAX_HTML, BaseStory
 from indexer.worker import (
@@ -85,6 +86,7 @@ AVG_REDIRECTS = 3
 USER_AGENT = "mediacloud bot for open academic research (+https://mediacloud.org)"
 HEADERS = {"User-Agent": USER_AGENT}
 
+# HHTP response codes to retry:
 RETRY_HTTP_CODES = set(
     [
         408,  # Request Timeout
@@ -98,11 +100,8 @@ RETRY_HTTP_CODES = set(
     ]
 )
 
+# distinct counters for these HTTP response codes:
 SEPARATE_COUNTS = set([403, 404, 429])
-
-# Possible polishing:
-# Keep requests Session in slot to reuse connections??
-# Keep requests Session per thread
 
 logger = logging.getLogger("fetcher")  # avoid __main__
 
@@ -133,11 +132,21 @@ class Retry(Exception):
     """
 
 
+class FetchReturn(NamedTuple):
+    resp: Optional[requests.Response]
+
+    # only valid if resp is None:
+    counter: str
+    quarantine: bool
+
+
 class Fetcher(MultiThreadStoryWorker):
     WORKER_THREADS_DEFAULT = 200  # equiv to 20 fetchers, with 10 active fetches
 
     # Just discard stories after connection errors:
-    NO_QUARANTINE = (Retry, requests.exceptions.RequestException)
+    # NOTE: other requests.exceptions may be needed
+    # but entire RequestException hierarchy includes bad URLs
+    NO_QUARANTINE = (Retry, ConnectionError)
 
     def __init__(self, process_name: str, descr: str):
         super().__init__(process_name, descr)
@@ -190,7 +199,7 @@ class Fetcher(MultiThreadStoryWorker):
         # enable debug dump on SIGQUIT (CTRL-\)
         def quit_handler(sig: int, frame: Optional[FrameType]) -> None:
             if self.scoreboard:
-                self.scoreboard.debug_info()
+                self.scoreboard.debug_info_nolock()  # XXX TEMP
 
         # used to work, now dumping core on return
         signal.signal(signal.SIGQUIT, quit_handler)
@@ -201,7 +210,66 @@ class Fetcher(MultiThreadStoryWorker):
         """
         assert self.scoreboard
         with self.timer("status"):
-            self.scoreboard.periodic()
+            self.scoreboard.debug_info_nolock()
+
+    def fetch(self, sess: requests.Session, fqdn: str, url: str) -> FetchReturn:
+        """
+        perform HTTP get, tracking redirects looking for non-news domains
+
+        Returns FetchReturn NamedTuple for uniform handling of counts.
+        """
+        redirects = 0
+
+        # loop following redirects
+        while True:
+            with self.timer("get"):  # time each HTTP get
+                try:
+                    resp = sess.get(
+                        url,
+                        allow_redirects=False,
+                        headers=HEADERS,
+                        timeout=(CONNECT_SECONDS, READ_SECONDS),
+                        verify=False,  # raises connection rate
+                    )
+                except (
+                    requests.exceptions.InvalidSchema,
+                    requests.exceptions.MissingSchema,
+                    requests.exceptions.InvalidURL,
+                ):
+                    # all other exceptions trigger retries in indexer.Worker
+                    return FetchReturn(None, "badurl2", False)
+
+            if not resp.is_redirect:
+                # here with a non-redirect HTTP response:
+                # it could be an HTTP error!
+                return FetchReturn(resp, "SNH", False)
+
+            # here with redirect:
+            nextreq = resp.next  # PreparedRequest
+            if nextreq and nextreq.url:
+                # maybe just use PreparedRequest in loop?
+                url = nextreq.url
+            else:
+                url = ""
+
+            redirects += 1
+            if redirects >= MAX_REDIRECTS:
+                return FetchReturn(None, "maxredir", False)
+
+            if not url or not isinstance(url, str):
+                return FetchReturn(None, "badredir", False)
+            try:
+                fqdn = url_fqdn(url)
+            except (TypeError, ValueError):
+                return FetchReturn(None, "badredir2", False)
+
+            # NOTE: adding a counter here would count each story fetch attempt more than once
+            logger.info("redirect (%d) => %s", resp.status_code, url)
+
+            if non_news_domain(fqdn):
+                return FetchReturn(None, "non-news2", False)
+
+        # end infinite redirect loop
 
     def count_story(self, status: str) -> None:
         """
@@ -209,20 +277,18 @@ class Fetcher(MultiThreadStoryWorker):
         """
         self.incr("stories", labels=[("status", status)])
 
-    def quarantine(self, reason: str) -> None:
-        self.count_story(reason)
-        raise QuarantineException(reason)
-
-    def discard(self, reason: str, msg: str) -> None:
+    def discard(self, counter: str, msg: str) -> None:
         """
         drop story
         """
-        self.count_story(reason)
-        logger.info("discard %s: %s", reason, msg)
+        self.count_story(counter)
+        logger.info("discard %s: %s", counter, msg)
 
     def process_story(self, sender: StorySender, story: BaseStory) -> None:
         """
         called from multiple worker threads!!
+
+        This routine should call count_story EXACTLY once!
         """
         rss = story.rss_entry()
 
@@ -234,11 +300,12 @@ class Fetcher(MultiThreadStoryWorker):
 
         # XXX handle missing URL schema??
 
-        # Maybe move inside redirect loop, and reissue against new
-        # domain??  (especially matters for news from aggregators) if
-        # issue for "next" domain fails, requeue with intermediate
-        # next as place to continue???
-        fqdn = url_fqdn(url)  # XXX handle {Type,Value}Error?
+        # BEFORE issue (discard without any delay)
+        try:
+            fqdn = url_fqdn(url)
+        except (TypeError, ValueError):
+            return self.discard("badurl1", url)
+
         if non_news_domain(fqdn):
             return self.discard("non-news", url)
 
@@ -265,71 +332,30 @@ class Fetcher(MultiThreadStoryWorker):
                 self.count_story("busy")
                 raise Requeue("busy")  # does not increment retry count
 
-        redirects = 0
-        got_connection = False  # for retire
-
+        # here with slot marked active *MUST* call ir.slot.retire!!!!
         with self.timer("fetch"):
             # log starting URL
             logger.info("fetch %s", url)
 
-            # here with slot marked active
             sess = requests.Session()
-            resp = None
             try:  # call retire on exit
-                # loop following redirects
-                while True:
-                    if non_news_domain(fqdn):
-                        return self.discard("non-news2", url)
-
-                    # Let connection error exceptions cause retries.
-                    # NOTE!!! Any return or exception without
-                    # got_connection set to True will increment the
-                    # "noconn" counter (due to try/finally), and each
-                    # Story fetch attempt should only be counted ONCE!
-                    # SO: if you increment another counter, and want
-                    # to return and discard the Story, you'll need to
-                    # set got_connection to True!
-                    got_connection = False
-
-                    # XXX wrap in try: treat {Invalid,Missing}Schema,
-                    # InvalidURL as fatal (discard or quarantine)??
-                    with self.timer("get"):
-                        resp = sess.get(
-                            url,
-                            allow_redirects=False,
-                            headers=HEADERS,
-                            timeout=(CONNECT_SECONDS, READ_SECONDS),
-                            verify=False,  # raises connection rate
-                        )
-                    got_connection = True
-                    if not resp.is_redirect:
-                        break
-
-                    # here with redirect:
-                    redirects += 1
-                    if redirects >= MAX_REDIRECTS:
-                        return self.discard("maxredir", url)
-                    nextreq = resp.next  # PreparedRequest
-                    if nextreq:
-                        # maybe just use PreparedRequest in loop?
-                        url = nextreq.url
-                    else:
-                        url = ""
-                    if not url or not isinstance(url, str):
-                        return self.discard("badredir", repr(url))
-                    fqdn = url_fqdn(url)  # XXX handle {Type,Value}Error?
-                    # NOTE: adding a counter here would count each story fetch attempt more than once
-                    logger.info("redirect (%d) => %s", resp.status_code, url)
-                # end redirect loop
+                fret = self.fetch(sess, fqdn, url)
+                got_connection = True
+            except Exception:
+                self.count_story("noconn")
+                got_connection = False
+                raise
             finally:
                 ir.slot.retire(got_connection)  # release slot
                 sess.close()
-                if not got_connection:
-                    # here on Exception from "get"
-                    # want retry (return would discard)
-                    self.count_story("noconn")
 
-        # check resp is not None?
+        resp = fret.resp  # requests.Response
+        if resp is None:  # NOTE!!! non-200 responses are Falsy?!
+            if fret.quarantine:
+                self.count_story(fret.counter)
+                raise QuarantineException(fret.counter)
+            return self.discard(fret.counter, url)
+
         status = resp.status_code
         if status != 200:
             if status in SEPARATE_COUNTS:
