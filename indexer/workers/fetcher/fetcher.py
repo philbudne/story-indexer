@@ -86,11 +86,14 @@ AVG_REDIRECTS = 3
 USER_AGENT = "mediacloud bot for open academic research (+https://mediacloud.org)"
 HEADERS = {"User-Agent": USER_AGENT}
 
-# HHTP response codes to retry:
+# HHTP response codes to retry
+# (all others cause URL to be discarded)
 RETRY_HTTP_CODES = set(
     [
         408,  # Request Timeout
         429,  # Too Many Requests
+        500,  # Internal Server Error
+        # 501 is "Not Implemented"
         502,  # Bad Gateway
         503,  # Service Unavailable
         504,  # Gateway Timeout
@@ -199,9 +202,8 @@ class Fetcher(MultiThreadStoryWorker):
         # enable debug dump on SIGQUIT (CTRL-\)
         def quit_handler(sig: int, frame: Optional[FrameType]) -> None:
             if self.scoreboard:
-                self.scoreboard.debug_info_nolock()  # XXX TEMP
+                self.scoreboard.debug_info_nolock()
 
-        # used to work, now dumping core on return
         signal.signal(signal.SIGQUIT, quit_handler)
 
     def periodic(self) -> None:
@@ -210,7 +212,7 @@ class Fetcher(MultiThreadStoryWorker):
         """
         assert self.scoreboard
         with self.timer("status"):
-            self.scoreboard.debug_info_nolock()
+            self.scoreboard.periodic()
 
     def fetch(self, sess: requests.Session, fqdn: str, url: str) -> FetchReturn:
         """

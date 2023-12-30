@@ -126,12 +126,10 @@ class Timer:
 
     def __str__(self) -> str:
         if self.last == _NEVER:
-            return "-"
+            return "not set"
         if self.expired():
-            x = "+"
-        else:
-            x = ""
-        return f"{self.elapsed():.3f}{x}"
+            return "expired"
+        return f"{self.elapsed():.3f}"
 
 
 class IssueStatus(Enum):
@@ -376,10 +374,10 @@ class ScoreBoard:
 
         now = time.monotonic()
         for name, ts in list(self.thread_status.items()):
-            # by definition debug info, but only on request
-            # so try to avoid having it filtered out:
             if name == lock_owner_name:
-                have_lock = "*"
+                have_lock = " *LOCK*"
             else:
-                have_lock = " "
+                have_lock = ""
+            # by definition debug info, but only on request/error
+            # so try to avoid having it filtered out:
             logger.info("%s%s %.3f %s", name, have_lock, now - ts.ts, ts.info)
