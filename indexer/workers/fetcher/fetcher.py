@@ -1,3 +1,4 @@
+# XXX encoding determination needs work!
 # XXX handle missing URL schema?
 # XXX send timer stats for URLs/slots active???
 # XXX Quarantine bad URLs?
