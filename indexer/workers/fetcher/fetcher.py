@@ -40,6 +40,7 @@ from typing import NamedTuple, Optional
 from urllib.parse import SplitResult, urlsplit
 
 import requests
+from bs4.dammit import UnicodeDammit
 from mcmetadata.urls import NON_NEWS_DOMAINS
 from requests.exceptions import ConnectionError
 
@@ -72,6 +73,8 @@ AVG_REDIRECTS = 3
 
 # get from common place (with rss-fetcher)
 USER_AGENT = "mediacloud bot for open academic research (+https://mediacloud.org)"
+
+# scrapy default headers include: "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 HEADERS = {"User-Agent": USER_AGENT}
 
 # HHTP response codes to retry
@@ -371,21 +374,40 @@ class Fetcher(MultiThreadStoryWorker):
 
         logger.info("length %d", lcontent)  # XXX report ms?
 
+        # Scrapy skipped non-text documents: need to filter them out
+        ct = resp.headers.get("content-type", "")
+        if not resp.encoding and not (
+            ct.startswith("text/")
+            or ct.startswith("application/xhtml")
+            or ct.startswith("application/vnd.wap.xhtml+xml")
+            or ct.startswith("application/xml")
+        ):
+            # other XML types handled by scrapy: application/atom+xml
+            # application/rdf+xml application/rss+xml
+            return self.discard("not-text", ct)
+
         if lcontent == 0:
             return self.discard("no-html", url)
         elif lcontent > MAX_HTML:
             return self.discard("oversized", url)
 
+        # scrapy also did character set digging, using their own
+        # w3lib.encoding routines.  try using BeautifulSoup:
+        ud = UnicodeDammit(
+            resp.content, is_html=True, known_definite_encodings=[resp.encoding]
+        )
+
         with self.timer("queue"):
             with story.http_metadata() as hmd:
                 hmd.response_code = status
                 hmd.final_url = resp.url
-                hmd.encoding = resp.encoding
+                hmd.encoding = resp.encoding  # http content-type header
                 hmd.fetch_timestamp = time.time()
 
             with story.raw_html() as rh:
-                rh.html = content
-                rh.encoding = resp.encoding
+                # ud.markup is str, u.detector.markup is bytes w/o BOM
+                rh.html = ud.detector.markup or resp.content
+                rh.encoding = ud.original_encoding  # detected encoding
 
             sender.send_story(story)
         self.count_story("success")
