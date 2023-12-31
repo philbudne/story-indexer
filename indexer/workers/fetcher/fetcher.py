@@ -383,7 +383,9 @@ class Fetcher(MultiThreadStoryWorker):
             or ct.startswith("application/xml")
         ):
             # other XML types handled by scrapy: application/atom+xml
-            # application/rdf+xml application/rss+xml
+            # application/rdf+xml application/rss+xml.
+            # Logging the rejected content-types here
+            # so that they can be seen in the log files:
             return self.discard("not-text", ct)
 
         if lcontent == 0:
@@ -391,23 +393,44 @@ class Fetcher(MultiThreadStoryWorker):
         elif lcontent > MAX_HTML:
             return self.discard("oversized", url)
 
-        # scrapy also did character set digging, using their own
-        # w3lib.encoding routines.  try using BeautifulSoup:
-        ud = UnicodeDammit(
-            resp.content, is_html=True, known_definite_encodings=[resp.encoding]
-        )
+        # scrapy also does character set digging, using their own
+        # w3lib.encoding routines.  requests has a deprecated
+        # get_encodings_from_content function, which has moved to
+        # requests_toolbelt.utils.deprecated.get_encodings_from_content().
+        # Trying BeautifulSoup's "dammit" module.  Seems to be *QUITE*
+        # compute intensive, and there are good arguments that the
+        # functionality belongs in the "parser" worker, or even in the
+        # mcmetadata library (would need to add taking bytes and the
+        # content-type header encoding to the API, preferably with a
+        # new function name), putting it here (for now) for
+        # back-compatibility, AND because this fetcher likely is
+        # running more threads than there are parser container
+        # replicas AND it seems like the computation keeps multiple
+        # threads busy (perhaps because the load is in attempted
+        # "decode" operations, implemented in C and therefore not
+        # requiring holding the Python Global Interpreter Lock).
+        # HOWEVER, it's still tempting to try and replicate the scrapy
+        # behavior using w3lib, doing the final decode ONLY in the
+        # parser...
+        with self.timer("encoding"):
+            ud = UnicodeDammit(
+                resp.content, is_html=True, known_definite_encodings=[resp.encoding]
+            )
+            # u.markup is decoded/unicode str (which we ignore),
+            # u.detector.markup is original bytes w/o BOM stripped.
+            html = ud.detector.markup or resp.content
+            encoding = ud.original_encoding
 
         with self.timer("queue"):
             with story.http_metadata() as hmd:
                 hmd.response_code = status
                 hmd.final_url = resp.url
-                hmd.encoding = resp.encoding  # http content-type header
+                hmd.encoding = resp.encoding  # from content-type header
                 hmd.fetch_timestamp = time.time()
 
             with story.raw_html() as rh:
-                # ud.markup is str, u.detector.markup is bytes w/o BOM
-                rh.html = ud.detector.markup or resp.content
-                rh.encoding = ud.original_encoding  # detected encoding
+                rh.html = html
+                rh.encoding = encoding  # detected encoding
 
             sender.send_story(story)
         self.count_story("success")
