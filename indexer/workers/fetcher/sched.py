@@ -201,7 +201,8 @@ class Slot:
 
     def retire(self, got_connection: bool) -> None:
         """
-        called when a fetch attempt has ended
+        called when a fetch attempt has ended.
+        got_connection is False when the connection attempt failed.
         """
         with self.sb.big_lock:
             assert self.active_count > 0
