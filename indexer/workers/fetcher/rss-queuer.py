@@ -196,4 +196,4 @@ class RSSQueuer(Queuer):
 
 
 if __name__ == "__main__":
-    run(RSSQueuer, "queue-rss", "parse and queue rss-fetcher RSS entries")
+    run(RSSQueuer, "rss-queuer", "parse and queue rss-fetcher RSS entries")
