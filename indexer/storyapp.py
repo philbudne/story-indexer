@@ -429,6 +429,12 @@ class MultiThreadStoryWorker(IntervalMixin, StoryWorker):
             self.threads[i] = t
 
     def _queue_kisses_of_death(self) -> None:
+        """
+        queue a "None" for each worker thread,
+        ensuring everyone wakes up and knows the end is near.
+
+        Called from main thread when _running has been set to False.
+        """
         logger.info("queue_kisses_of_death")
         self._running = False
 
