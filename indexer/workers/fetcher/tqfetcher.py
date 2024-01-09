@@ -1,6 +1,5 @@
 # XXX handle missing URL schema?
 # XXX Quarantine bad URLs?
-# XXX send kisses of death when pika thread exits?!
 """
 "Threaded Queue Fetcher" using RabbitMQ
 
@@ -194,6 +193,7 @@ class Fetcher(MultiThreadStoryWorker):
 
         # loop following redirects
 
+        # prepare initial request:
         request = requests.Request("GET", url, headers=HEADERS)
         prepreq = sess.prepare_request(request)
         while True:
@@ -276,13 +276,29 @@ class Fetcher(MultiThreadStoryWorker):
         # report time to issue: if this jumps up, it's
         # likely due to lock contention!
         with self.timer("issue"):
+            # XXX fqdn isn't QUITE right: it means every
+            # foobar.blogspot.com is treated as a separate server.
+            # Really want to use IP address (see sched.py), but that
+            # would require resolving the FQDN, and *THEN* using that
+            # address to make the HTTP connection *AND* subsequent
+            # redirect fetches (if the FQDN stays the same).
+
+            # NOT using "domain" from RSS file because I originally
+            # was planning to move the "issue" call inside the
+            # redirect loop (getting clearance for each FQDN along the
+            # chain), but if we ended up with a "busy", we'd have to
+            # retry and start ALL over, or add a field to the Story
+            # indicating the "next URL" to attempt to fetch, along
+            # with a count of followed redirects.
             ir = self.scoreboard.issue(fqdn, url)
 
         if ir.slot is None:  # could not be issued
             if ir.status == IssueStatus.SKIPPED:
                 # Skipped due to recent connection error: Treat as if
-                # we saw an error as well (incrementing retry count)
-                # rather than waiting 30 seconds for connection to fail.
+                # we saw an error as well (incrementing retry count on the Story)
+                # rather than waiting 30 seconds for connection to fail again.
+                # After a failure the scheduler remembers the slot as failing
+                # for CONN_RETRY_MINUTES (not currently tunable via an option).
                 self.incr_stories("skipped", url)
                 raise Retry("skipped due to recent connection failure")
             else:
@@ -306,9 +322,11 @@ class Fetcher(MultiThreadStoryWorker):
             except Exception:
                 self.incr_stories("noconn", url)
                 got_connection = False
-                raise
+                raise  # re-raised for retry counting
             finally:
-                ir.slot.retire(got_connection)  # release slot
+                # decrement slot active_count!
+                # remember if connection attempt failed.
+                ir.slot.retire(got_connection)
                 sess.close()
 
         resp = fret.resp  # requests.Response
