@@ -168,9 +168,9 @@ class RSSQueuer(Queuer):
         def add_previous(days: int) -> None:
             add_by_date(previous(days))
 
-        self.yesterday = previous(1)
+        self.yesterday = previous(1)  # for range check
 
-        if args.fetch_date:
+        if args.fetch_date:  # handle --fetch-date option(s)
             for date in args.fetch_date:
                 if len(date) != 10 or date > self.yesterday or date < "2022-02-18":
                     logger.error("bad date %s", date)
@@ -180,6 +180,7 @@ class RSSQueuer(Queuer):
         if args.yesterday:
             add_previous(1)
         elif args.days is not None:
+            # work backwards from yesterday
             for days in range(1, args.days + 1):
                 add_previous(days)
 
@@ -189,9 +190,6 @@ class RSSQueuer(Queuer):
         implied by --fetch-date, --days and --yesterday
         with an uncompressed (binary) byte stream
         """
-
-        # XXX handle SAXParseException here, or pass error_handler=ErrorHandler
-        # XXX not handling errors means a bad (poison) file will gum up the works!
         xml.sax.parse(fobj, RSSHandler(self))
 
 
