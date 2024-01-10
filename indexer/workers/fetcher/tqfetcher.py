@@ -353,11 +353,11 @@ class Fetcher(MultiThreadStoryWorker):
         # here with status == 200
         content = resp.content  # bytes
         lcontent = len(content)
+        ct = resp.headers.get("content-type", "")
 
-        logger.info("length %d", lcontent)  # XXX report ms?
+        logger.info("length %d content-type %s", lcontent, ct)  # XXX report ms?
 
         # Scrapy skipped non-text documents: need to filter them out
-        ct = resp.headers.get("content-type", "")
         if not resp.encoding and not (
             ct.startswith("text/")
             or ct.startswith("application/xhtml")
@@ -368,10 +368,10 @@ class Fetcher(MultiThreadStoryWorker):
             # application/rdf+xml application/rss+xml.
             # Logging the rejected content-types here
             # so that they can be seen in the log files:
-            return self.incr_stories("not-text", ct)
+            return self.incr_stories("not-text", url)
 
-        if self.check_story_length(content, url):
-            return
+        if not self.check_story_length(content, url):
+            return  # logged and counted
 
         final_url = resp.url
         with self.timer("queue"):
