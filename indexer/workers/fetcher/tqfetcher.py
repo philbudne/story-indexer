@@ -331,10 +331,10 @@ class Fetcher(MultiThreadStoryWorker):
 
         resp = fret.resp  # requests.Response
         if resp is None:  # NOTE!!! non-200 responses are Falsy?!
+            self.incr_stories(fret.counter, url)
             if fret.quarantine:
-                self.incr_stories(fret.counter, url)
                 raise QuarantineException(fret.counter)
-            return self.incr_stories(fret.counter, url)
+            return
 
         status = resp.status_code
         if status != 200:
