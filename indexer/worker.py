@@ -811,6 +811,16 @@ class Worker(QApp):
         )
         return True  # requeued
 
+    def message_queue_len(self) -> int:
+        """
+        NOTE! the underlying qsize method is described as "unreliable"
+        USE ONLY FOR LOGGING/STATS!!
+        """
+        if self._message_queue:
+            return self._message_queue.qsize()
+        else:
+            return 0
+
     def process_message(self, im: InputMessage) -> None:
         raise NotImplementedError("Worker.process_message not overridden")
 

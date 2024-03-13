@@ -10,6 +10,7 @@ Story specific QApp stuff, split from worker.py
 
 import argparse
 import logging
+import multiprocessing
 import os
 import queue
 import sys
@@ -376,10 +377,8 @@ class BatchStoryWorker(StoryWorker):
 class MultiThreadStoryWorker(IntervalMixin, StoryWorker):
     # include thread name in log message format
     LOG_FORMAT = "thread"
-
-    # subclass must set value!
-    # (else will see AttributeError)
-    WORKER_THREADS_DEFAULT: int
+    CPU_COUNT = multiprocessing.cpu_count()
+    WORKER_THREADS_DEFAULT = CPU_COUNT
 
     def __init__(self, process_name: str, descr: str):
         super().__init__(process_name, descr)

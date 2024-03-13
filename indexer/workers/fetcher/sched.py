@@ -12,9 +12,7 @@ import math
 import threading
 import time
 from enum import Enum
-from typing import Any, Callable, Dict, List, NoReturn, Optional, Type
-
-from indexer.app import App
+from typing import Any, Callable, Dict, List, NamedTuple, NoReturn, Optional, Type
 
 # number of seconds after start of last request to keep idle slot around
 # if no active/delayed requests and no errors (maintains request RTT)
@@ -189,6 +187,16 @@ class ConnStatus(Enum):
     DATA = 1
 
 
+class StartStatus(Enum):
+    """
+    status from start()
+    """
+
+    OK = 1  # ok to start
+    SKIP = 2  # recently reported down
+    BUSY = 3  # currently busy
+
+
 DELAY_SKIP = -1.0  # recent attempt failed
 DELAY_LONG = -2.0  # delay to long to hold
 
@@ -243,7 +251,7 @@ class Slot:
         self.sb.delayed += 1
         return delay
 
-    def _start(self) -> bool:
+    def _start(self) -> StartStatus:
         """
         Here in a worker thread, convert from delayed to active
         returns False if connection failed recently
@@ -258,13 +266,16 @@ class Slot:
         # last test so that preference is short delay
         # (and hope an active fetch succeeds).
         if not self.last_conn_error.expired():
-            return False
+            return StartStatus.SKIP
+
+        if self.active >= self.sb.target_concurrency:
+            return StartStatus.BUSY
 
         self.active += 1
         self.last_start.reset()
 
         self.active_threads.append(threading.current_thread().name)
-        return True
+        return StartStatus.OK
 
     def finish(self, conn_status: ConnStatus, sec: float) -> None:
         """
@@ -320,21 +331,41 @@ class ThreadStatus:
     ts: float  # time.monotonic
 
 
+class StartRet(NamedTuple):
+    """
+    return value from start()
+    """
+
+    status: StartStatus
+    slot: Optional[Slot]
+
+
+class Stats(NamedTuple):
+    """
+    statistics returned by periodic()
+    """
+
+    slots: int
+    active_fetches: int
+    active_slots: int
+    delayed: int
+
+
 class ScoreBoard:
     """
     keep score of active requests by "id" (str)
     """
 
+    # arguments changed often in development,
+    # so all must be passed by keyword
     def __init__(
         self,
         *,
-        app: App,  # for stats
         target_concurrency: int,  # max active with same id (domain)
         max_delay_seconds: float,  # max time to hold
         conn_retry_seconds: float,  # seconds before connect retry
         min_interval_seconds: float,
     ):
-        self.app = app
         # single lock, rather than one each for scoreboard, active count,
         # and each slot.  Time spent with lock held should be small,
         # and lock ordering issues likely to make code complex and fragile!
@@ -371,29 +402,28 @@ class ScoreBoard:
     def get_delay(self, slot_id: str) -> float:
         """
         called when story first picked up from message queue.
-        return time to hold message before starting,
+        return time to hold message before starting (delayed counts incremented)
         if too long (more than max_delay_seconds), returns -1
         """
         with self.big_lock:
             slot = self._get_slot(slot_id)
             return slot._get_delay()
 
-    def start(self, slot_id: str, note: str) -> Optional[Slot]:
+    def start(self, slot_id: str, note: str) -> StartRet:
         """
         here from worker thread, after delay (if any)
         """
         with self.big_lock:
             slot = self._get_slot(slot_id)
             status = slot._start()
-            if status:
+            if status == StartStatus.OK:
                 # *MUST* call slot.finished() when done
                 if slot.active == 1:  # was idle
                     self.active_slots += 1
                 self.active_fetches += 1
                 self._set_thread_status(note)  # full URL
-                return slot
-            # here with recent connection failure
-            return None
+                return StartRet(status, slot)
+            return StartRet(status, None)
 
     def _slot_finished(self, slot_idle: bool) -> None:
         """
@@ -420,36 +450,26 @@ class ScoreBoard:
         ts.info = info
         ts.ts = time.monotonic()
 
-    def periodic(self, dump_slots: bool = False) -> None:
+    def periodic(self, dump_slots: bool = False) -> Stats:
         """
-        called periodically from main thread
+        called periodically from main thread.
+        NOTE!! dump_slots logs with lock held!!!!
+        Use only for debug!
         """
         with self.big_lock:
             # do this less frequently?
             for slot in list(self.slots.values()):
                 slot._consider_removing()
 
-            # avoid stats, logging with lock held: just grab
-            recent = len(self.slots)
-            active_fetches = self.active_fetches
-            active_slots = self.active_slots
-            delayed = self.delayed
-
-            if dump_slots:
+            if dump_slots:  # NOTE!!! logs with lock held!!!
                 self.debug_info_nolock()
 
-        logger.info(
-            "%d recently active; %d URLs active, %d delayed in %d domains active",
-            recent,
-            active_fetches,
-            delayed,
-            active_slots,
-        )
-
-        self.app.gauge("active.recent", recent)
-        self.app.gauge("active.fetches", active_fetches)
-        self.app.gauge("active.slots", active_slots)
-        self.app.gauge("delayed.fetches", delayed)
+            return Stats(
+                slots=len(self.slots),
+                active_fetches=self.active_fetches,
+                active_slots=self.active_slots,
+                delayed=self.delayed,
+            )
 
     def debug_info_nolock(self) -> None:
         """

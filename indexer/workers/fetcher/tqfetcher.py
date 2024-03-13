@@ -17,9 +17,9 @@ We have thirty minutes to ACK a message before RabbitMQ has a fit
 * All scheduling done in Pika thread, as messages delivered by Pika
   * As messages come to _on_input_message, the next time a fetch could
     be issued is assigned by calling scoreboard.get_delay
-  * If the delay would mean the fetch would start more than BUSY_DELAY_SECONDS
+  * If the delay would mean the fetch would start more than BUSY_DELAY_MINUTES
     in the future, the message is requeued to the "-fast" delay queue
-    (and will return in BUSY_DELAY_SECONDS).
+    (and will return in BUSY_DELAY_MINUTES).
   * If connections to the server have failed "recently", behave as if
     this connection failed, and requeue the story for retry.
   * Else call pika_connection.call_later w/ the entire InputMessage and
@@ -30,6 +30,7 @@ We have thirty minutes to ACK a message before RabbitMQ has a fit
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
@@ -49,14 +50,29 @@ from indexer.storyapp import (
     non_news_fqdn,
     url_fqdn,
 )
-from indexer.worker import InputMessage, QuarantineException
-from indexer.workers.fetcher.sched import DELAY_LONG, DELAY_SKIP, ConnStatus, ScoreBoard
+from indexer.worker import (
+    CONSUMER_TIMEOUT_SECONDS,
+    InputMessage,
+    QuarantineException,
+    RequeueException,
+)
+from indexer.workers.fetcher.sched import (
+    DELAY_LONG,
+    DELAY_SKIP,
+    ConnStatus,
+    ScoreBoard,
+    StartStatus,
+)
 
 TARGET_CONCURRENCY = 10  # scrapy fetcher AUTOTHROTTLE_TARGET_CONCURRENCY
-MIN_INTERVAL_SECONDS = 1
+
+# minimum interval between initiation of requests to a site
+# lower values increase chance of concurrent connections to
+# sites that respond quickly.
+MIN_INTERVAL_SECONDS = 0.25
 
 # default delay time for "fast" queue, and max time to delay stories
-BUSY_DELAY_SECONDS = 10 * 60
+BUSY_DELAY_MINUTES = 10
 
 # time cache server as bad after a connection failure
 CONN_RETRY_MINUTES = 10
@@ -110,7 +126,8 @@ class FetchReturn(NamedTuple):
 
 
 class Fetcher(MultiThreadStoryWorker):
-    WORKER_THREADS_DEFAULT = 200  # equiv to 20 fetchers, with 10 active fetches
+    # worker threads use from 25% to 50% cpu
+    WORKER_THREADS_DEFAULT = MultiThreadStoryWorker.CPU_COUNT * 2
 
     # Exceptions to discard instead of quarantine after repeated retries:
     # RequestException hierarchy includes bad URLs
@@ -125,10 +142,10 @@ class Fetcher(MultiThreadStoryWorker):
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
         ap.add_argument(
-            "--busy-delay-seconds",
+            "--busy-delay-minutes",
             type=float,
-            default=BUSY_DELAY_SECONDS,
-            help=f"busy (fast) queue delay in seconds (default: {BUSY_DELAY_SECONDS})",
+            default=BUSY_DELAY_MINUTES,
+            help=f"busy (fast) queue delay in minutes (default: {BUSY_DELAY_MINUTES})",
         )
 
         ap.add_argument(
@@ -136,6 +153,13 @@ class Fetcher(MultiThreadStoryWorker):
             type=float,
             default=CONN_RETRY_MINUTES,
             help=f"minutes to cache connection failure (default: {CONN_RETRY_MINUTES})",
+        )
+
+        ap.add_argument(
+            "--min-interval-seconds",
+            type=float,
+            default=MIN_INTERVAL_SECONDS,
+            help=f"minimum connection interval in seconds (default: {MIN_INTERVAL_SECONDS})",
         )
 
         ap.add_argument(
@@ -163,10 +187,9 @@ class Fetcher(MultiThreadStoryWorker):
             )
             sys.exit(1)
 
-        self.busy_delay_seconds = self.args.busy_delay_seconds
+        self.busy_delay_seconds = self.args.busy_delay_minutes * 60
 
         self.scoreboard = ScoreBoard(
-            app=self,
             target_concurrency=self.args.target_concurrency,
             max_delay_seconds=self.busy_delay_seconds,
             conn_retry_seconds=self.args.conn_retry_minutes * 60,
@@ -184,10 +207,25 @@ class Fetcher(MultiThreadStoryWorker):
 
     def _qos(self, chan: BlockingChannel) -> None:
         """
-        set "prefetch" limit (number of unacked messages queued at any one time)
+        set "prefetch" limit
+        (number of unacked messages delayed, queued or active)
         """
-        assert self.args
-        prefetch = int(self.workers * self.busy_delay_seconds / MIN_INTERVAL_SECONDS)
+        # get a PESSIMISTIC limit on the number of messages to be
+        # handed by RabbitMQ: If RMQ sends more stories than we can
+        # process before the 30 minute "consumer timeout" RMQ will
+        # close the connection!
+
+        # time to handle a request after maximum delay (via call_later)
+        work_time = CONSUMER_TIMEOUT_SECONDS - self.busy_delay_seconds
+
+        # Maximum time to handle a request.  This is both low (read
+        # timeout applies to each network read) and (most of the time)
+        # high: would have to have working DNS but no TCP connectivity
+        # to have ALL requests fail.  Non-responding sites are
+        # "skipped" on subsequent requests when a connection fails.
+        max_request_seconds = CONNECT_SECONDS + READ_SECONDS
+
+        prefetch = int(self.workers * work_time / max_request_seconds)
         if prefetch > 65535:  # 16-bit field
             prefetch = 65535
         logger.info("setting prefetch to %d", prefetch)
@@ -201,7 +239,27 @@ class Fetcher(MultiThreadStoryWorker):
         assert self.args
 
         with self.timer("status"):
-            self.scoreboard.periodic(self.args.dump_slots)
+            stats = self.scoreboard.periodic(self.args.dump_slots)
+
+        qlen = self.message_queue_len()
+        # delayed counts not adjusted until "start" called
+        delayed = stats.delayed - qlen
+        load_avgs = os.getloadavg()
+        logger.info(
+            "%d slots; %d act requests, %d delayed, %d queued to %d sites, lavg %.2f",
+            stats.slots,
+            stats.active_fetches,
+            delayed,
+            qlen,
+            stats.active_slots,
+            load_avgs[0],
+        )
+
+        self.gauge("slots", stats.slots)
+        self.gauge("active.fetches", stats.active_fetches)
+        self.gauge("active.slots", stats.active_slots)
+        self.gauge("delayed", delayed)
+        self.gauge("qlen", qlen)
 
     def fetch(self, sess: requests.Session, url: str) -> FetchReturn:
         """
@@ -339,16 +397,21 @@ class Fetcher(MultiThreadStoryWorker):
                 delay = self.scoreboard.get_delay(id)
 
             logger.info("%s: delay %.3f", url, delay)
-
             if delay >= 0:
-
+                # NOTE! Using pika connection.call_later because it's available.
+                # "put" does not need to be run in the Pika thread, and the
+                # delay _could_ be managed in another thread.
                 def put() -> None:
                     # _put_message queue is the normal "_on_input_message" handler
+                    logger.debug("put #%s", im.method.delivery_tag)
                     self._put_message_queue(im)
 
-                # round delay up to ms, to avoid calling early
-                self.connection.call_later(round(delay, 3), put)
                 # holding message, will be acked when processed
+                if delay == 0:
+                    put()
+                else:
+                    logger.debug("delay #%s", im.method.delivery_tag)
+                    self.connection.call_later(delay, put)
                 return
             elif delay == DELAY_SKIP:
                 raise Retry("skipped due to recent connection failure")
@@ -372,10 +435,17 @@ class Fetcher(MultiThreadStoryWorker):
             return
 
         assert self.scoreboard is not None
-        slot = self.scoreboard.start(id, url)
-        if slot is None:
+        start_status, slot = self.scoreboard.start(id, url)
+        if start_status == StartStatus.SKIP:
             self.incr_stories("skipped2", url)
             raise Retry("skipped due to recent connection failure")
+        elif start_status == StartStatus.BUSY:
+            self.incr_stories("busy", url)
+            raise RequeueException("busy")
+        elif start_status != StartStatus.OK:
+            logger.warning("start status %s: %s", start_status, url)
+            raise Retry(f"start status {start_status}")
+        assert slot is not None
 
         # ***NOTE*** here with slot marked active *MUST* call slot.finish!!!!
         t0 = time.monotonic()
@@ -432,7 +502,6 @@ class Fetcher(MultiThreadStoryWorker):
                 raise Retry(msg)
             else:
                 return self.incr_stories(counter, msg)
-
         # here with status == 200
         content = resp.content  # bytes
         lcontent = len(content)
