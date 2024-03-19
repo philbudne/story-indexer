@@ -28,7 +28,6 @@ import os
 import random
 import sys
 import tempfile
-import time
 from typing import TYPE_CHECKING, Any, BinaryIO, Generator, List, Optional, cast
 
 import boto3
@@ -48,8 +47,6 @@ logger = logging.getLogger(__name__)
 
 
 class Queuer(StoryProducer):
-    MAX_QUEUE_LEN = 100000  # don't queue if (any) dest queue longer than this
-
     AWS_PREFIX: str  # prefix for environment vars
 
     HANDLE_GZIP: bool  # True to intervene if .gz present
@@ -81,22 +78,10 @@ class Queuer(StoryProducer):
             help="ignore tracking database (for test)",
         )
         ap.add_argument(
-            "--max-queue-len",
-            type=int,
-            default=self.MAX_QUEUE_LEN,
-            help=f"Maximum queue length at which to send a new batch (default: {self.MAX_QUEUE_LEN})",
-        )
-        ap.add_argument(
             "--max-stories",
             type=int,
             default=None,
             help="Number of stories to queue. Default (None) is 'all of them'",
-        )
-        ap.add_argument(
-            "--loop",
-            action="store_true",
-            default=False,
-            help="Run until all files processed (sleeping if needed), else process one file and quit.",
         )
         ap.add_argument(
             "--random-sample",
@@ -202,50 +187,6 @@ class Queuer(StoryProducer):
         Wrap with TextIOWrapper for reading strings
         """
         raise NotImplementedError("process_file not overridden")
-
-    def check_output_queues(self) -> None:
-        """
-        snooze while output queue(s) have enough work;
-        if in "try one and quit" (crontab) mode, just quit.
-        """
-
-        assert self.args
-        max_queue = self.args.max_queue_len
-
-        # get list of queues fed from this app's output exchange
-        admin = self.admin_api()
-        defns = admin.get_definitions()
-        output_exchange = self.output_exchange_name
-        queue_names = set(
-            [
-                binding["destination"]
-                for binding in defns["bindings"]
-                if binding["source"] == output_exchange
-            ]
-        )
-
-        while True:
-            # also wanted/used by scripts.rabbitmq-stats:
-            queues = admin._api_get("/api/queues")
-            for q in queues:
-                name = q["name"]
-                if name in queue_names:
-                    ready = q["messages_ready"]
-                    logger.debug("%s: ready %d", name, ready)
-                    if ready > max_queue:
-                        break
-            else:
-                # here when all queues short enough
-                return
-
-            if self.args.loop:
-                logger.debug("sleeping until output queue(s) shorter")
-                time.sleep(60)
-            else:
-                logger.info(
-                    "queue(s) full enough: queued %d stories", self.queued_stories
-                )
-                sys.exit(0)
 
     def s3_client(self) -> S3Client:
         """

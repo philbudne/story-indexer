@@ -212,6 +212,8 @@ class QApp(App):
         # debugging aid to use with --from-quarantine:
         self._crash_on_exception = os.environ.get("WORKER_EXCEPTION_CRASH", "") != ""
 
+        self.sent_messages = 0
+
         # queues/exchanges created using indexer.pipeline:
         self.input_queue_name = input_queue_name(self.process_name)
         self.output_exchange_name = output_exchange_name(self.process_name)
@@ -482,6 +484,7 @@ class QApp(App):
                 "send exch '%s' key '%s' %d bytes", exchange, routing_key, len(data)
             )
             chan.basic_publish(exchange, routing_key, data, properties)
+            self.sent_messages += 1
 
         self._call_in_pika_thread(sender)
 
@@ -823,6 +826,78 @@ class Worker(QApp):
 
     def process_message(self, im: InputMessage) -> None:
         raise NotImplementedError("Worker.process_message not overridden")
+
+
+class Producer(QApp):
+    """
+    QApp that produces messages
+    """
+
+    MAX_QUEUE_LEN = 100000  # don't queue if (any) dest queue longer than this
+
+    def __init__(self, process_name: str, descr: str):
+        super().__init__(process_name, descr)
+        self.sent_messages = 0
+
+    def define_options(self, ap: argparse.ArgumentParser) -> None:
+        super().define_options(ap)
+
+        ap.add_argument(
+            "--loop",
+            action="store_true",
+            default=False,
+            help="Run until all files/input processed (sleeping if needed), else process one file/batch and quit.",
+        )
+        ap.add_argument(
+            "--max-queue-len",
+            type=int,
+            default=self.MAX_QUEUE_LEN,
+            help=f"Maximum queue length at which to send a new batch (default: {self.MAX_QUEUE_LEN})",
+        )
+
+    def check_output_queues(self) -> None:
+        """
+        snooze while output queue(s) have enough work;
+        if in "try one and quit" (crontab) mode, just quit.
+        """
+
+        assert self.args
+        max_queue = self.args.max_queue_len
+
+        # get list of queues fed from this app's output exchange
+        admin = self.admin_api()
+        defns = admin.get_definitions()
+        output_exchange = self.output_exchange_name
+        queue_names = set(
+            [
+                binding["destination"]
+                for binding in defns["bindings"]
+                if binding["source"] == output_exchange
+            ]
+        )
+
+        while True:
+            # also wanted/used by scripts.rabbitmq-stats:
+            queues = admin._api_get("/api/queues")
+            for q in queues:
+                name = q["name"]
+                if name in queue_names:
+                    ready = q["messages_ready"]
+                    logger.debug("%s: ready %d", name, ready)
+                    if ready > max_queue:
+                        break
+            else:
+                # here when all queues short enough
+                return
+
+            if self.args.loop:
+                logger.debug("sleeping until output queue(s) shorter")
+                time.sleep(60)
+            else:
+                logger.info(
+                    "queue(s) full enough: sent %d messages", self.sent_messages
+                )
+                sys.exit(0)
 
 
 # story-related classes etc moved to storyapp.py

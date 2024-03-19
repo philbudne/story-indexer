@@ -29,6 +29,7 @@ from indexer.worker import (
     CONSUMER_TIMEOUT_SECONDS,
     DEFAULT_ROUTING_KEY,
     InputMessage,
+    Producer,
     QApp,
     Worker,
 )
@@ -174,9 +175,9 @@ class StorySender:
         )
 
 
-class StoryProducer(StoryMixin, QApp):
+class StoryProducer(StoryMixin, Producer):
     """
-    QApp that queues new Story objects (w/o receiving any)
+    Producer that queues new Story objects (w/o receiving any)
     """
 
     def story_sender(self) -> StorySender:
