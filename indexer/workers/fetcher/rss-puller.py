@@ -182,5 +182,4 @@ class RSSFetcher(StoryProducer):
 
 if __name__ == "__main__":
     # XXX TEMP: use rss-queuer-out exchange:
-    breakpoint()
     run(RSSFetcher, "rss-queuer", "fetch stories using rss-fetcher API")
