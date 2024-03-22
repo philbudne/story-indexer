@@ -15,7 +15,7 @@ import requests
 
 from indexer.app import AppException, run
 from indexer.path import app_data_dir
-from indexer.story import RSSEntry, StoryFactory
+from indexer.story import StoryFactory
 from indexer.storyapp import StoryProducer, StorySender
 
 Story = StoryFactory()
@@ -61,7 +61,7 @@ class SerialFile:
                 self.old_stats = os.fstat(f.fileno())
         except FileNotFoundError:
             next_ = 0
-            logger.info("%s not found: using %d", self.path, next)
+            logger.info("%s not found: using %d", self.path, next_)
             self.old_stats = None
         return next_
 
@@ -201,11 +201,11 @@ class RSSFetcher(StoryProducer):
                 pass
 
             story = Story()
-            with cast(RSSEntry, story.rss_entry()) as rss:  # XXX temp cast!
+            with story.rss_entry() as rss:
                 rss.link = url
                 rss.title = s.get("title")
                 rss.domain = s.get("domain")
-                rss.publication_date = rfc2822_pub_date
+                rss.pub_date = rfc2822_pub_date
                 rss.fetch_date = s.get("fetched_at")
                 rss.source_feed_id = s.get("feed_id")
                 rss.source_source_id = s.get("sources_id")
