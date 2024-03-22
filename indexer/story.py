@@ -4,7 +4,7 @@ import pickle
 import re
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 from uuid import NAMESPACE_URL, uuid3
 
 import cchardet as chardet
@@ -32,6 +32,9 @@ def class_to_member_name(original_class: Callable, private: bool = True) -> str:
     else:
         prefix = ""
     return prefix + re.sub("([a-z0-9])([A-Z])", r"\1_\2", name).lower()
+
+
+TStoryData = TypeVar("TStoryData", bound="StoryData")
 
 
 @dataclass(kw_only=True)
@@ -64,7 +67,7 @@ class StoryData:
         self.frozen = True
 
     # Implementing typing on return:self is really finicky, just doing Any for now
-    def __enter__(self) -> Any:
+    def __enter__(self: TStoryData) -> TStoryData:
         self.frozen = False
         return self
 
