@@ -1,5 +1,6 @@
 """
-StoryProducer that uses rss-fetcher API to pull stories
+Pull storeies using rss-fetcher API to fetch stories without an actual
+RSS file.
 """
 
 import argparse
@@ -15,15 +16,38 @@ import requests
 
 from indexer.app import AppException, run
 from indexer.path import app_data_dir
-from indexer.story import StoryFactory
-from indexer.storyapp import StoryProducer, StorySender
+from indexer.serialfile import SerialFile
+from indexer.story import RSSEntry, StoryFactory
+from indexer.storyapp import StoryProducer
 
 Story = StoryFactory()
 
+logger = logging.getLogger("rss-queuer")
 
+
+# for API:
+def rss_fetcher_name2opt(name: str) -> str:
+    """
+    convert short name to full option name
+    """
+    return "rss-fetcher-" + name
+
+
+def rss_fetcher_name2var(name: str) -> str:
+    """
+    convert short name to name of args namespace property
+    """
+    return rss_fetcher_name2opt(name).replace("-", "_")
+
+
+def rss_fetcher_name2env(name: str) -> str:
+    return rss_fetcher_name2var(name).upper()
+
+
+# for API:
 class StoryJSON(TypedDict):
     """
-    JSON rows returned by rss-fetcher /api/rss_entries
+    JSON rows returned by rss-fetcher API /api/rss_entries
     """
 
     id: int
@@ -34,99 +58,51 @@ class StoryJSON(TypedDict):
     sources_id: int | None
     feed_id: int | None
     feed_url: str | None
+    fetched_at: str | None  # added in rss-fetcher 0.16.1
 
 
-class SerialFile:
-    """
-    read/write a file that keeps a numeric cookie
-
-    Abstracted to a class so can be moved to an (ES?) database
-    "properties" table
-
-    MUST call last and write in pairs
-    (don't assume last thing written is the contents of the file)
-    """
-
-    def __init__(self, path: str):
-        self.path = path
-        self.old_stats: os.stat_result | None = None
-
-    def next(self) -> int:
-        """
-        return serial number of next item to read, or 0
-        """
-        try:
-            with open(self.path) as f:
-                next_ = int(f.readline().strip())
-                self.old_stats = os.fstat(f.fileno())
-        except FileNotFoundError:
-            next_ = 0
-            logger.info("%s not found: using %d", self.path, next_)
-            self.old_stats = None
-        return next_
-
-    def write(self, next_: int) -> None:
-        """
-        write cookie to file.
-        Do NOT assume file will contain last written contents!!!
-        """
-        if self.old_stats:
-            old_mtime = self.old_stats.st_mtime
-            self.old_stats = None
-            new_stat = os.stat(self.path)
-            if new_stat.st_mtime != old_mtime:
-                logger.warning("%s: modification time changed since read", self.path)
-                # XXX maybe return??
-
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(f"{next_}\n")
-        # try to survive unremovable .prev file
-        try:
-            if os.path.exists(self.path):
-                os.rename(self.path, self.path + ".prev")
-        except OSError:
-            pass
-        os.rename(tmp, self.path)
-
-
-logger = logging.getLogger("rss-puller")
-
-
-def arg2env(name: str) -> str:
-    return "RSS_FETCHER_" + name.upper()
-
-
-class RSSFetcher(StoryProducer):
+class RSSPuller(StoryProducer):
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
 
-        ap.add_argument(
-            "--count",
-            default=1000,
-            type=int,
-            help="number of RSS entries to fetch in a batch",
-        )
-
-        def add(name: str) -> None:
-            env = os.environ.get(arg2env(name))
+        # no defaults (all private)
+        def add_rss_fetcher_arg(name: str) -> None:
+            env = os.environ.get(rss_fetcher_name2env(name))
             ap.add_argument(
-                f"--{name}", default=env, help=f"rss-fetcher {name} (default: {env})"
+                "--" + rss_fetcher_name2opt(name),
+                default=env,
+                help=f"rss-fetcher API {name} (default: {env})",
             )
 
-        add("url")
-        add("user")
-        add("password")
+        add_rss_fetcher_arg("url")
+        add_rss_fetcher_arg("user")
+        add_rss_fetcher_arg("password")
+
+        default_batch_size = int(os.environ.get("RSS_FETCHER_BATCH_SIZE", 1000))
+        ap.add_argument(
+            "--rss-fetcher-batch-size",
+            type=int,
+            default=default_batch_size,
+            help=f"Use rss-fetcher API to fetch stories (default: {default_batch_size})",
+        )
 
     def process_args(self) -> None:
         super().process_args()
-        assert self.args
-        self.dry_run = self.args.dry_run
+
+        args = self.args
+        assert args
+
+        self.dry_run = args.dry_run
 
         def get(name: str) -> str:
-            val = getattr(self.args, name)
+            member_name = rss_fetcher_name2var(name)
+            val = getattr(self.args, member_name)
             if val == "" or val is None:
-                logger.error("need --%s or %s env var", name, arg2env(name))
+                logger.error(
+                    "need --%s or %s env var",
+                    rss_fetcher_name2opt(name),
+                    rss_fetcher_name2env(name),
+                )
                 sys.exit(1)
             assert isinstance(val, str)
             return val
@@ -135,7 +111,10 @@ class RSSFetcher(StoryProducer):
         self.rss_fetcher_pass = get("password")
         self.rss_fetcher_url = get("url")
 
-    def pull_stories(self, first: int, count: int) -> tuple[list[StoryJSON], int]:
+    def api_pull_stories(self, first: int, count: int) -> tuple[list[StoryJSON], int]:
+        # There is an RSS API access class in the web-search repo, but it's
+        # not a "public API", so there doesn't seem to be much point in putting
+        # the code in a PyPI module of it's own.
         url = f"{self.rss_fetcher_url}/api/rss_entries/{first}?_limit={count}"
         if self.rss_fetcher_user and self.rss_fetcher_pass:
             auth = requests.auth.HTTPBasicAuth(
@@ -143,7 +122,7 @@ class RSSFetcher(StoryProducer):
             )
         else:
             auth = None
-        hdrs = {"User-Agent": "story-indexer rss-puller"}
+        hdrs = {"User-Agent": "story-indexer rss-queuer.py"}
         response = requests.get(url, auth=auth, headers=hdrs)
 
         if response.status_code != 200:
@@ -163,12 +142,13 @@ class RSSFetcher(StoryProducer):
             next_ = first
         return (rows, next_)
 
-    def get_some(self, sender: StorySender, next_: int, count: int) -> tuple[int, int]:
+    # for API:
+    def api_get_and_queue(self, next_: int, count: int) -> tuple[int, int]:
         """
         pull and queue stories;
         returns count, new next_
         """
-        stories, nnext = self.pull_stories(next_, count)
+        stories, new_next = self.api_pull_stories(next_, count)
         got = len(stories)
         logger.info("next %d got %d", next_, got)
 
@@ -177,7 +157,9 @@ class RSSFetcher(StoryProducer):
             url = s.get("url")
 
             if not isinstance(url, str):
-                self.incr_stories("bad", str(url))  # log and count
+                # don't muddy the water if just a dry-run:
+                if not self.dry_run:
+                    self.incr_stories("no-url", str(url))  # log and count
                 continue
 
             if not self.check_story_url(url):
@@ -193,60 +175,57 @@ class RSSFetcher(StoryProducer):
                 pass
 
             story = Story()
-            with story.rss_entry() as rss:
+            rss: RSSEntry = story.rss_entry()  # Temp typing?
+            with rss:
                 rss.link = url
                 rss.title = s.get("title")
                 rss.domain = s.get("domain")
                 rss.pub_date = rfc2822_pub_date
-                rss.fetch_date = s.get("fetched_at")
+                # for tracking/debug only:
                 rss.source_feed_id = s.get("feed_id")
                 rss.source_source_id = s.get("sources_id")
                 rss.source_url = s.get("feed_url")
                 rss.via = f"{id_}@{self.rss_fetcher_url}"
-            # will start Pika thread on first story
-
-            if not self.dry_run:
-                sender.send_story(story)
+                rss.fetch_date = s.get("fetched_at")  # rss-fetcher 0.16.1
+            self.send_story(story)
         # end for s in stories:
-
-        return (got, nnext)  # return new next
+        return (got, new_next)
 
     def main_loop(self) -> None:
         assert self.args
 
-        data_file = os.path.join(app_data_dir(self.process_name), "next-rss-entry")
-
-        count = self.args.count
-        sender = self.story_sender()
-
         total = 0
-        serial_file = SerialFile(data_file)
+        batch_size = self.args.rss_fetcher_batch_size
+        serial_file = SerialFile(
+            os.path.join(app_data_dir(self.process_name), "next-rss-entry")
+        )
 
         while True:
             # may sleep or exit if queues full enough
             self.check_output_queues()
 
             next_ = serial_file.next()
-            got, new_next = self.get_some(sender, next_, count)
+            got, new_next = self.api_get_and_queue(next_, batch_size)
             total += got
 
             if new_next != next_:
                 if not self.dry_run:
                     serial_file.write(new_next)
 
-            if new_next == next_ or got < count:
+            if new_next == next_ or got < batch_size:
                 # got nothing or short batch
                 assert self.args
                 if self.args.loop:
+                    logger.debug("sleeping...")
                     time.sleep(60)
                 else:
                     logger.info("quitting: sent %d stories", total)
                     return
             else:
-                # give rss-fetcher API a quick break to avoid driving up load
+                # give rss-fetcher API a quick break to avoid driving up load.
                 # 0.5 sec/k adds ~4 minutes to daily fetch of 500K stories
                 time.sleep(0.5)
 
 
 if __name__ == "__main__":
-    run(RSSFetcher, "rss-puller", "pull stories using rss-fetcher API")
+    run(RSSPuller, "rss-puller", "pull stories using rss-fetcher API")
