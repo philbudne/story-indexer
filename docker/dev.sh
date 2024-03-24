@@ -20,6 +20,11 @@ QUEUER_S3_ACCESS_KEY_ID=AKxxxxxx
 QUEUER_S3_REGION=us-east-1
 QUEUER_S3_SECRET_ACCESS_KEY=..........
 #
+# for rss-queuer, if all set for rss-queuer will use rss-fetcher API
+RSS_FETCHER_PASSWORD=
+RSS_FETCHER_URL=
+RSS_FETCHER_USER=
+#
 # SENTRY only enabled when SENTRY_DSN is non-empty
 SENTRY_DSN=
 SENTRY_ENVIRONMENT=disabled_by_empty_dsn
