@@ -108,14 +108,6 @@ class RSSFetcher(StoryProducer):
             help="number of RSS entries to fetch in a batch",
         )
 
-        ap.add_argument(
-            "--dry-run",
-            "-n",
-            action="store_true",
-            default=False,
-            help="don't queue stories",
-        )
-
         def add(name: str) -> None:
             env = os.environ.get(arg2env(name))
             ap.add_argument(
