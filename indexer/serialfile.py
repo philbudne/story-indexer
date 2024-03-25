@@ -20,14 +20,19 @@ class SerialFile:
     (NEVER assume last thing written is the contents of the file)!
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, force: bool):
         self.path = path
+        self.force = force
         self.old_stats: os.stat_result | None = None
+        self._last = 0  # used when force=True
 
     def next(self) -> int:
         """
         return serial number of next item to read, or 0
         """
+        if self.force:
+            return self._last
+
         try:
             with open(self.path) as f:
                 next_ = int(f.readline().strip())
@@ -43,6 +48,10 @@ class SerialFile:
         write cookie to file.
         Do NOT assume file will contain last written contents!!!
         """
+        if self.force:
+            self._last = next_
+            return
+
         if self.old_stats:
             old_mtime = self.old_stats.st_mtime
             self.old_stats = None

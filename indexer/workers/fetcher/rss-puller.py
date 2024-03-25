@@ -194,23 +194,17 @@ class RSSPuller(StoryProducer):
     def main_loop(self) -> None:
         assert self.args
 
-        total = 0
         batch_size = self.args.rss_fetcher_batch_size
-        serial_file = SerialFile(
-            os.path.join(app_data_dir(self.process_name), "next-rss-entry")
-        )
-
+        fname = os.path.join(app_data_dir(self.process_name), "next-rss-entry")
+        serial_file = SerialFile(fname, force=self.args.force or self.args.dry_run)
         while True:
-            # may sleep or exit if queues full enough
+            # may sleep (if looping) or exit if queues full enough
             self.check_output_queues()
 
             next_ = serial_file.next()
             got, new_next = self.api_get_and_queue(next_, batch_size)
-            total += got
-
             if new_next != next_:
-                if not self.dry_run:
-                    serial_file.write(new_next)
+                serial_file.write(new_next)
 
             if new_next == next_ or got < batch_size:
                 # got nothing or short batch
@@ -219,10 +213,11 @@ class RSSPuller(StoryProducer):
                     logger.debug("sleeping...")
                     time.sleep(60)
                 else:
-                    logger.info("quitting: sent %d stories", total)
+                    # not saying "queued", since they aren't w/ --dry-run
+                    logger.info("quitting: fetched %d stories", self.queued_stories)
                     return
             else:
-                # give rss-fetcher API a quick break to avoid driving up load.
+                # give rss-fetcher API a quick break.
                 # 0.5 sec/k adds ~4 minutes to daily fetch of 500K stories
                 time.sleep(0.5)
 
