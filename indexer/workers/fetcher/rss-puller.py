@@ -8,6 +8,7 @@ import datetime as dt
 import email.utils
 import logging
 import os
+import random
 import sys
 import time
 from typing import TypedDict, cast
@@ -25,7 +26,6 @@ Story = StoryFactory()
 logger = logging.getLogger("rss-queuer")
 
 
-# for API:
 def rss_fetcher_name2opt(name: str) -> str:
     """
     convert short name to full option name
@@ -151,6 +151,9 @@ class RSSPuller(StoryProducer):
         stories, new_next = self.api_pull_stories(next_, count)
         got = len(stories)
         logger.info("next %d got %d", next_, got)
+
+        # try randomizing order to break up blocks to same fqdn
+        random.shuffle(stories)
 
         for s in stories:
             id_ = s.get("id")
