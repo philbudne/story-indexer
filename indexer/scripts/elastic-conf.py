@@ -146,7 +146,7 @@ class ElasticConf(ElasticConfMixin, App):
                 )
                 return False
 
-            settings = {}
+            settings: dict[str, str | None] = {}
             if self.es_snapshot_s3_bucket:
                 settings["bucket"] = self.es_snapshot_s3_bucket
             if self.es_snapshot_s3_endpoint:
