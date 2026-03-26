@@ -20,9 +20,9 @@ def upgrade() -> None:
     op.create_table(
         "crumb",
         sa.Column("date", sa.String, primary_key=True, nullable=False),
-        sa.Column("feed_id", sa.Integer, primary_key=True),
-        sa.Column("source_id", sa.Integer, primary_key=True),
-        sa.Column("domain", sa.String, primary_key=True),
+        sa.Column("feed_id", sa.Integer, primary_key=True, nullable=True),
+        sa.Column("source_id", sa.Integer, primary_key=True, nullable=True),
+        sa.Column("domain", sa.String, primary_key=True, nullable=True),
         sa.Column("app", sa.String, primary_key=True, nullable=False),
         sa.Column("status", sa.String, primary_key=True, nullable=False),
         sa.Column("count", sa.Integer, nullable=False, default=1),

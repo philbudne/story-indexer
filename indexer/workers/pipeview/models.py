@@ -32,12 +32,16 @@ class Crumb(Base):
     # YYYY-MM-DD:
     date: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
 
-    feed_id: Mapped[int | None] = mapped_column(Integer, primary_key=True)
+    feed_id: Mapped[int | None] = mapped_column(
+        Integer, primary_key=True, nullable=True
+    )
 
-    source_id: Mapped[int | None] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int | None] = mapped_column(
+        Integer, primary_key=True, nullable=True
+    )
 
     # null before parser:
-    domain: Mapped[str | None] = mapped_column(String, primary_key=True)
+    domain: Mapped[str | None] = mapped_column(String, primary_key=True, nullable=True)
 
     app: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
 
