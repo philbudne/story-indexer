@@ -1,3 +1,4 @@
+import os
 from logging.config import fileConfig
 from typing import Any, cast
 
@@ -10,6 +11,8 @@ from indexer.workers.pipeview.models import Base
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+config.set_main_option("sqlalchemy.url", os.environ.get("DATABASE_URL", ""))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
