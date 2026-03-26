@@ -9,16 +9,16 @@ import os
 
 # PyPI
 import sqlalchemy.orm as orm
-
-# local dir
-from models import Crumb
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.dialects.postgresql import insert
 
-# story-indexer
+# story-indexer/indexer
 from indexer.app import AppException, run
 from indexer.storyapp import StoryMixin
 from indexer.worker import InputMessage, Worker
+
+# local dir:
+from indexer.workers.pipeview.models import Crumb
 
 # Used for INSERT ... ON CONFLICT
 CRUMB_PK_COLUMNS = [key.name for key in inspect(Crumb).primary_key]
