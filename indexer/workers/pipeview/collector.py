@@ -20,8 +20,9 @@ from indexer.worker import InputMessage, Worker
 # local dir:
 from indexer.workers.pipeview.models import Crumb
 
-# Used for INSERT ... ON CONFLICT
-CRUMB_PK_COLUMNS = [key.name for key in inspect(Crumb).primary_key]
+# Used to get columns for INSERT ... ON CONFLICT
+CRUMB_TABLE = "crumb"
+CRUMB_UNIQUE = "crumb_unique"
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +44,15 @@ class Collector(Worker):  # NOT a StoryWorker!
             raise AppException("need DATABASE_URL")
 
         # pool_size? echo??
-        engine = create_engine(database_url)
+        self.engine = create_engine(database_url)
 
         # factory for SesionType with presupplied parameters:
-        self.session_factory = orm.sessionmaker(bind=engine)
+        self.session_factory = orm.sessionmaker(bind=self.engine)
+
+        inspector = inspect(self.engine)
+        indexes = inspector.get_indexes(CRUMB_TABLE)
+        logger.info("indexes %r", indexes)
+        self.unique_columns: list[str] = []  # XXX
 
     def process_message(self, im: InputMessage) -> None:
         """
@@ -96,7 +102,7 @@ class Collector(Worker):  # NOT a StoryWorker!
             insert(Crumb)
             .values(rows)
             .on_conflict_do_update(
-                index_elements=CRUMB_PK_COLUMNS, set_={"count": Crumb.count + 1}
+                index_elements=self.unique_columns, set_={"count": Crumb.count + 1}
             )
         )
 

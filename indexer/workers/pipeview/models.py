@@ -5,8 +5,8 @@ Using full ORM/Declarative declarations
 """
 
 # PyPI:
-from sqlalchemy import Integer, String
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+import sqlalchemy as sa
+from sqlalchemy.orm import DeclarativeBase, mapped_column
 
 
 # declarative base class
@@ -23,29 +23,27 @@ class Crumb(Base):
     may need (many) additional indices to support query patterns,
     but that's left to alembic to manage.
 
-    MUST have composite primary key OR constraint in order
+    MUST have composite unique index named "crumb_unique"
     for UPDATE ... ON CONFLICT "incsert" to function properly!!
     """
 
     __tablename__ = "crumb"
 
+    id = mapped_column(sa.BigInteger, primary_key=True, autoincrement=True)
+
     # YYYY-MM-DD:
-    date: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    date = mapped_column(sa.String, nullable=False)
 
-    feed_id: Mapped[int | None] = mapped_column(
-        Integer, primary_key=True, nullable=True
-    )
+    feed_id = mapped_column(sa.BigInteger)
 
-    source_id: Mapped[int | None] = mapped_column(
-        Integer, primary_key=True, nullable=True
-    )
+    source_id = mapped_column(sa.BigInteger)
 
     # null before parser:
-    domain: Mapped[str | None] = mapped_column(String, primary_key=True, nullable=True)
+    domain = mapped_column(sa.String)
 
-    app: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    app = mapped_column(sa.String, nullable=False)
 
-    status: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    status = mapped_column(sa.String, nullable=False)
 
     # incremented for each matching breadcrumb:
-    count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    count = mapped_column(sa.BigInteger, nullable=False, server_default="1")

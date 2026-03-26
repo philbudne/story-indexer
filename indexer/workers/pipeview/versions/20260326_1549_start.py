@@ -19,15 +19,25 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "crumb",
-        sa.Column("date", sa.String, primary_key=True, nullable=False),
-        sa.Column("feed_id", sa.Integer, primary_key=True, nullable=True),
-        sa.Column("source_id", sa.Integer, primary_key=True, nullable=True),
-        sa.Column("domain", sa.String, primary_key=True, nullable=True),
-        sa.Column("app", sa.String, primary_key=True, nullable=False),
-        sa.Column("status", sa.String, primary_key=True, nullable=False),
-        sa.Column("count", sa.Integer, nullable=False, default=1),
+        sa.Column("id", sa.BigInteger, primary_key=True),
+        sa.Column("date", sa.String, nullable=False),
+        sa.Column("feed_id", sa.BigInteger),
+        sa.Column("source_id", sa.BigInteger),
+        sa.Column("domain", sa.String),
+        sa.Column("app", sa.String, nullable=False),
+        sa.Column("status", sa.String, nullable=False),
+        sa.Column("count", sa.BigInteger, nullable=False, server_default="1"),
+    )
+    # wanted to have a wide primary key and no id column,
+    # but sqlalchemy made everything in primary-key not-null
+    op.create_index(
+        "crumb_unique",
+        "crumb",
+        ["date", "feed_id", "source_id", "domain", "app", "status"],
+        unique=True,
     )
 
 
 def downgrade() -> None:
+    op.drop_index("crumb_unique")
     op.drop_table("crumb")
