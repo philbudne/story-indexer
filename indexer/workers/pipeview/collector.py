@@ -50,9 +50,17 @@ class Collector(Worker):  # NOT a StoryWorker!
         self.session_factory = orm.sessionmaker(bind=self.engine)
 
         inspector = inspect(self.engine)
-        indexes = inspector.get_indexes(CRUMB_TABLE)
-        logger.info("indexes %r", indexes)
-        self.unique_columns: list[str] = []  # XXX
+        for index in inspector.get_indexes(CRUMB_TABLE):
+            if index["name"] == CRUMB_UNIQUE and index["unique"]:
+                self.unique_columns: list[str] = []
+                # is typed list[str | None]:
+                for c in index["column_names"]:
+                    if isinstance(c, str):
+                        self.unique_columns.append(c)
+                assert len(self.unique_columns) > 0
+                break
+        else:
+            raise AppException(f"could not find {CRUMB_TABLE} index {CRUMB_UNIQUE}")
 
     def process_message(self, im: InputMessage) -> None:
         """
