@@ -58,6 +58,7 @@ class Collector(Worker):  # NOT a StoryWorker!
                     if isinstance(c, str):
                         self.unique_columns.append(c)
                 assert len(self.unique_columns) > 0
+                logger.info("crumb unique columns: %r", self.unique_columns)
                 break
         else:
             raise AppException(f"could not find {CRUMB_TABLE} index {CRUMB_UNIQUE}")
