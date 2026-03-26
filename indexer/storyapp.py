@@ -17,7 +17,7 @@ import random
 import sys
 import threading
 import time
-from typing import Dict, List, Optional, TypeAlias, TypedDict
+from typing import Dict, List, Optional, TypeAlias, TypedDict, cast
 from urllib.parse import urlsplit
 
 from mcmetadata.urls import NON_NEWS_DOMAINS
@@ -72,11 +72,27 @@ def non_news_fqdn(fqdn: str) -> bool:
     return False
 
 
+class PipeviewBreadcrumbV1(TypedDict):
+    """
+    These "just happen" to match the pipeview db columns
+    """
+
+    feed_id: int | None
+    source_id: int | None
+    domain: str | None  # canonical_domain from parser
+    app: str
+    status: str
+    date: str
+
+
 class StoryMixin(AppProtocol):
     """
     The place for Story-specific methods for both
     StoryProducers (output only) and Workers (in/out)
     """
+
+    BAD_HOSTS = set(["localhost", "127.0.0.1", "[::1]"])
+    BREADCRUMB_VERSION = [1, 0, 0]  # version
 
     def define_options(self, ap: argparse.ArgumentParser) -> None:
         super().define_options(ap)
@@ -114,6 +130,25 @@ class StoryMixin(AppProtocol):
         # could send to a sub-logger (__name__ + '.stories')
         logger.log(log_level, "%s: %s", status, url)
 
+    def incr_stories_track(
+        self, status: str, url: str, story: BaseStory, log_level: int = logging.INFO
+    ) -> None:
+        self.incr_stories(status, url, log_level)
+        self.track_story(status, story)
+
+    def track_story(self, status: str, story: BaseStory) -> None:
+        rss = story.rss_entry()
+        cmd = story.content_metadata()
+        crumb = PipeviewBreadcrumbV1(
+            feed_id=rss.source_feed_id,
+            source_id=rss.source_source_id,
+            domain=cmd.canonical_domain,
+            app=self.process_name,
+            status=status,
+            date=time.strftime("%Y-%m-%d", time.gmtime()),
+        )
+        self.queue_breadcrumb(cast(dict, crumb))
+
     def check_story_length(self, html: bytes, url: str) -> bool:
         """
         check HTML length:
@@ -121,11 +156,11 @@ class StoryMixin(AppProtocol):
         and the Story should be discarded.
         """
         if not html:
-            self.incr_stories("no-html", url)
+            self.incr_stories("no-html", url)  # XXX incr_stories_track
             return False
 
         if len(html) > MAX_HTML_BYTES:
-            self.incr_stories("oversized", url)
+            self.incr_stories("oversized", url)  # XXX incr_stories_track
             return False
 
         return True
@@ -140,7 +175,7 @@ class StoryMixin(AppProtocol):
         redirect URL while fetching.
         """
         if not url:
-            self.incr_stories("no-url", url)
+            self.incr_stories("no-url", url)  # XXX incr_stories_track
             return False
 
         # XXX check for over-sized URL??
@@ -151,18 +186,22 @@ class StoryMixin(AppProtocol):
         try:
             surl = urlsplit(url, allow_fragments=False)
         except ValueError:
-            self.incr_stories("bad-url", url)
+            self.incr_stories("bad-url", url)  # XXX incr_stories_track
             return False
 
         hostname = surl.hostname
         if not hostname:
-            self.incr_stories("no-host", url)
+            self.incr_stories("no-host", url)  # XXX incr_stories_track
             return False
 
         # check for schema?
 
         if non_news_fqdn(hostname):
-            self.incr_stories("non-news", url)
+            self.incr_stories("non-news", url)  # XXX incr_stories_track
+            return False
+
+        if hostname in self.BAD_HOSTS:
+            self.incr_stories("bad-host", url)  # XXX incr_stories_track
             return False
 
         return True
@@ -454,6 +493,7 @@ class StoryProducer(StoryMixin, Producer):
             self.quit(0)
 
     def quit(self, status: int) -> None:
+        self._send_crumbs()
         sys.exit(status)
 
     def _batch_size(self) -> int:
@@ -498,6 +538,7 @@ class ShufflingStoryProducer(StoryProducer):
         """
         if self.sender is not None:
             self.sender.flush()
+            self._send_crumbs()
 
     def quit(self, status: int) -> None:
         """
@@ -710,6 +751,7 @@ class BatchStoryWorker(StoryWorker):
             last_msg = msgs[-1]
             assert last_msg
             self._ack_and_commit(last_msg, multiple=True)
+            self._send_crumbs()
             msg_number = 1
             msgs = []
 

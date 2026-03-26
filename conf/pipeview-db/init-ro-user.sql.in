@@ -1,0 +1,2 @@
+CREATE USER __RO_USER__ with PASSWORD '__RO_USER_PW__';
+GRANT pg_read_all_data TO __RO_USER_NAME__;

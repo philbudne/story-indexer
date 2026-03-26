@@ -424,8 +424,6 @@ services:
       ELASTICSEARCH_SNAPSHOT_REPO: mediacloud-elasticsearch-snapshots
 {% endif %}
 
-  ################ news search api (built elsewhere)
-
   # NOTE! Not building Docker image here (yet)
   # until version/revision control issues worked out.
 
@@ -443,6 +441,32 @@ services:
       ELASTICSEARCH_SNAPSHOT_REPO_SETTINGS_LOCATION: {{elasticsearch_snapshot_repo_settings_location}}
       ELASTICSEARCH_SNAPSHOT_REPO_TYPE: {{elasticsearch_snapshot_repo_type}}
       RUN: elastic-conf
+
+  {{pipeview_postgres_container}}:
+    <<: *base-service-settings
+    deploy:
+      <<: *worker-deploy-settings
+    environment:
+      <<: *base-environment-vars
+      PGPORT: {{pipeview_pgport}}
+      POSTGRES_DB: {{pipeview_postgres_db}}
+      POSTGRES_PASSWORD: {{pipeview_postgres_password}}
+      POSTGRES_USER: {{pipeview_postgres_user}}
+    image: {{pipeview_postgres_image}}
+    ports:
+      - "{{pipeview_postgres_port_exported}}:{{pipeview_pgport}}"
+    volumes:
+      - pipeview_db:/var/lib/postgresql/data
+
+  # a QApp; needs RABBITMQ_URL, STATSD_{REALM,URL}:
+  pipeview-worker:
+    <<: *worker-service-settings
+    deploy:
+      <<: *worker-deploy-settings
+    environment:
+      <<: *worker-environment-vars
+      RUN: pipeview
+      DATABASE_URL: {{pipeview_database_url}}
 
 {% macro define_volume(prefix, suffix='') %}
   {{prefix}}{{suffix}}:
@@ -466,6 +490,7 @@ volumes:
 {{ define_volume('rabbitmq_data') }}
 {% endif %}
 {{ define_volume('worker_data') }}
+{{ define_volume('pipeview_db') }}
 
 networks:
   default:

@@ -1,7 +1,7 @@
 # Media Cloud story-indexer metadata
 
 The key job of the story-indexer is to extract, augment, and archive online news stories. To accomplish
-these tasks the story-indexer creates a number of metadata fields, persisted in different ways and at 
+these tasks the story-indexer creates a number of metadata fields, persisted in different ways and at
 different times. These include:
 * `Story` objects used internally to manage data for workflow queues
 * Elasticsearch storage fields
@@ -199,7 +199,7 @@ Extracted text.
 
 ##### parsed_date (str)
 
-Populated by Parser (not mcmetadata), 
+Populated by Parser (not mcmetadata),
 despite the name, is UTC date-time (YYYY-MM-DD hh:mm:ss.uuuuuu
 
 Importer stores in Elasticsearch as `indexed_date`; If not available,

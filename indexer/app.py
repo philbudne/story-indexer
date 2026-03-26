@@ -59,6 +59,9 @@ class AppProtocol(Protocol):
 
     def timer(self, name: str) -> "_TimingContext": ...
 
+    def queue_breadcrumb(self, crumb: dict) -> None:
+        return
+
 
 # Dicts of log formats, indexed by App.LOG_FORMAT
 

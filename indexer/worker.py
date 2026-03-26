@@ -13,6 +13,7 @@ Story-specific things are in storyworker.py
 # * For code processing messages: Pika ops MUST be done from Pika thread
 
 import argparse
+import json
 import logging
 import os
 import queue
@@ -44,6 +45,7 @@ msglogger = logging.getLogger(__name__ + ".msgs")
 
 DEFAULT_EXCHANGE = ""  # routes to queue named by routing key
 DEFAULT_ROUTING_KEY = "default"
+BREADCRUMB_EXCHANGE = "breadcrumbs"
 
 # default consumer timeout (for ack) is 30 minutes:
 # https://www.rabbitmq.com/consumers.html#acknowledgement-timeout
@@ -206,6 +208,9 @@ class QApp(App):
     # (Pika thread causes problems for utilities that do blocking calls)
     START_PIKA_THREAD = False
 
+    # will send breadcrumbs if non-empty
+    BREADCRUMB_VERSION: list[int] = []
+
     def __init__(self, process_name: str, descr: str):
         super().__init__(process_name, descr)
 
@@ -219,6 +224,10 @@ class QApp(App):
         self._crash_on_exception = os.environ.get("WORKER_EXCEPTION_CRASH", "") != ""
 
         self.sent_messages = 0
+
+        self._breadcrumb_channel: Optional[BlockingChannel] = None
+        self._breadcrumb_queue: list[str] = []
+        self._breadcrumb_lock = threading.Lock()
 
         # queues/exchanges created using indexer.pipeline:
         self.input_queue_name = input_queue_name(self.process_name)
@@ -335,6 +344,9 @@ class QApp(App):
         assert url  # checked in process_args
         self.connection = BlockingConnection(URLParameters(url))
         logger.info(f"connected to {url}")
+
+        if self.BREADCRUMB_VERSION:
+            self._breadcrumb_chan = self.connection.channel()
 
         # start Pika I/O thread (ONLY ONE!)
         if self.START_PIKA_THREAD:
@@ -565,6 +577,43 @@ class QApp(App):
             time.sleep(0.1)
         return False
 
+    def queue_breadcrumb(self, crumb: dict) -> None:
+        assert self.BREADCRUMB_VERSION
+        text = json.dumps(crumb)
+        # queue.Queue is thread safe, but _send_crumbs
+        # below still needs atomic emptying
+        with self._breadcrumb_lock:
+            self._breadcrumb_queue.append(text)
+
+    def _send_crumbs(self) -> None:
+        if not self.BREADCRUMB_VERSION:
+            return
+
+        if self._breadcrumb_channel is None:
+            return
+
+        # use lock to empty atomically
+        # grabbing lock only once
+        with self._breadcrumb_lock:
+            crumbs = self._breadcrumb_queue
+            if not crumbs:
+                return
+            self._breadcrumb_queue = []
+
+        crumbs.insert(
+            0, json.dumps({"version": self.BREADCRUMB_VERSION, "sent_at": time.time()})
+        )
+        msg = "\n".join(crumbs)  # XXX need to encode?
+
+        def crumb_sender() -> None:
+            # NOTE! Default delivery mode is transient (not persisted on disk)
+            if self._breadcrumb_channel:  # mypy paranoia
+                self._breadcrumb_channel.basic_publish(
+                    BREADCRUMB_EXCHANGE, DEFAULT_ROUTING_KEY, msg
+                )
+
+        self._call_in_pika_thread(crumb_sender)
+
 
 class Worker(QApp):
     """
@@ -682,6 +731,7 @@ class Worker(QApp):
                 break
             self._process_one_message(im)
             self._ack_and_commit(im)
+            self._send_crumbs()
         logger.info("_process_messages returning")
 
     def _process_one_message(self, im: InputMessage) -> bool:
@@ -751,6 +801,7 @@ class Worker(QApp):
         chan.basic_ack(delivery_tag=tag, multiple=multiple)
         # AFTER basic_ack!
         chan.tx_commit()  # commit sent messages and ack atomically!
+        self._send_crumbs()
 
     def _exc_headers(self, e: Exception) -> Dict:
         """
