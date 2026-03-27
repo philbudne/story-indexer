@@ -70,41 +70,37 @@ class Collector(Worker):  # NOT a StoryWorker!
         """
 
         lines = im.body.decode("utf-8").split("\n")
+        logger.info("process_message: %d line(s)", len(lines))
         if not lines:
             # count? log??
             return
 
-        try:
-            v = json.loads(lines[0])
-            if "version" in v:
-                lines.pop(0)
-                if v[0] > StoryMixin.BREADCRUMB_VERSION[0]:
-                    # XXX count??
-                    logger.info("bad version: %r", v)
-                    return
-        except Exception as e:
-            # XXX count??
-            logger.error("exception parsing %s line: %.50r", lines[0], e)
-            return
-
         rows: list[dict] = []
+        first = True
+        version = []
         for line in lines:
             try:
                 j = json.loads(line)
                 assert isinstance(j, dict)
-                # XXX cast to storyapp.PipeviewBreadcrumbV1??
-                # adjust as needed for back-compat with version
-                # (almost CERTAINLY overkill!!!)???
-
-                # XXX preen data to weed out constraint violations?
-                rows.append(j)
             except Exception as e:
                 # XXX count??
                 logger.error("exception parsing %s: %.50r", line, e)
                 continue
 
-        # XXX count total??
-        print("got", len(rows), "rows")
+            if first:
+                first = False
+                if "version" in j:
+                    version = j["version"]
+                    if version[0] > StoryMixin.BREADCRUMB_VERSION[0]:
+                        logger.info("breadcrumbs too new: %r", version)
+                        return
+                    continue
+
+            logger.info("crumb: %r", j)
+            rows.append(j)
+
+        # XXX handle old version crumbs?
+        # XXX counter!!
 
         # an "upsert" that increments!
         incsert_stmt = (
@@ -118,7 +114,7 @@ class Collector(Worker):  # NOT a StoryWorker!
         with self.session_factory() as session:
             # XXX probably need to wrap in a try!!!
             result = session.execute(incsert_stmt)
-            print("result", result)
+        logger.info("incsert result %r", result)
 
 
 if __name__ == "__main__":
