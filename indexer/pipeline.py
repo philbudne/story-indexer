@@ -293,7 +293,8 @@ class Pipeline(QApp):
         # _could_ declare max queue size (and drop) at creation or via policy
         exchange(BREADCRUMB_EXCHANGE)
         pipeview_in = input_queue_name("pipeview")
-        queue(pipeview_in, durable=False)
+        print("***", BREADCRUMB_EXCHANGE, pipeview_in)
+        queue(pipeview_in)
         qbind(pipeview_in, BREADCRUMB_EXCHANGE, DEFAULT_ROUTING_KEY)
 
         if create:

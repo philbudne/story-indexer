@@ -628,14 +628,11 @@ class QApp(App):
         crumbs.insert(
             0, json.dumps({"version": self.BREADCRUMB_VERSION, "sent_at": time.time()})
         )
-        if self._breadcrumb_channel:  # mypy paranoia
-            # default is transient: not written to disk
-            msg = "\n".join(crumbs).encode("utf-8")
-            self._breadcrumb_channel.basic_publish(
-                BREADCRUMB_EXCHANGE, DEFAULT_ROUTING_KEY, msg
-            )
-        else:
-            logger.info("_crumb_publish no channel")
+        # default is transient: not written to disk
+        msg = "\n".join(crumbs).encode("utf-8")
+        self._breadcrumb_channel.basic_publish(
+            BREADCRUMB_EXCHANGE, DEFAULT_ROUTING_KEY, msg
+        )
 
 
 class Worker(QApp):
