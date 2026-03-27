@@ -82,6 +82,8 @@ class Collector(Worker):  # NOT a StoryWorker!
                     continue
             # XXX handle old version crumbs?
             # XXX discard if "date" too old!!!!
+            if "count" not in j:
+                j["count"] = 1
             rows.append(j)
 
         with self.session_factory() as session:
