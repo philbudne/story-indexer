@@ -17,7 +17,7 @@ import random
 import sys
 import threading
 import time
-from typing import Dict, List, Optional, TypeAlias, TypedDict, cast
+from typing import Dict, List, Optional, TypeAlias, TypedDict
 from urllib.parse import urlsplit
 
 from mcmetadata.urls import NON_NEWS_DOMAINS
@@ -72,19 +72,6 @@ def non_news_fqdn(fqdn: str) -> bool:
     return False
 
 
-class PipeviewBreadcrumbV1(TypedDict):
-    """
-    These "just happen" to match the pipeview db columns
-    """
-
-    feed_id: int | None
-    source_id: int | None
-    domain: str | None  # canonical_domain from parser
-    app: str
-    status: str
-    date: str
-
-
 class StoryMixin(AppProtocol):
     """
     The place for Story-specific methods for both
@@ -114,8 +101,33 @@ class StoryMixin(AppProtocol):
             # XXX set something to avoid rabbitmq-url check??
         super().process_args()  # after wacking AUTO_CONNECT
 
+    def make_crumb(
+        self,
+        *,
+        feed_id: int | None,
+        source_id: int | None,
+        domain: str | None,  # canonical_domain from parser
+        status: str,
+    ) -> dict:
+        """
+        These "just happen" to match the pipeview db columns
+        """
+        return {
+            "date": time.strftime("%Y-%m-%d", time.gmtime()),
+            "feed_id": feed_id,
+            "source_id": source_id,
+            "domain": domain,
+            "app": self.process_name,
+            "status": status,
+        }
+
     def incr_stories(
-        self, status: str, url: str, log_level: int = logging.INFO
+        self,
+        status: str,
+        url: str,
+        log_level: int = logging.INFO,
+        story: BaseStory | None = None,
+        crumb: dict | None = None,
     ) -> None:
         """
         Should be called exactly once for each Story processed.
@@ -130,24 +142,17 @@ class StoryMixin(AppProtocol):
         # could send to a sub-logger (__name__ + '.stories')
         logger.log(log_level, "%s: %s", status, url)
 
-    def incr_stories_track(
-        self, status: str, url: str, story: BaseStory, log_level: int = logging.INFO
-    ) -> None:
-        self.incr_stories(status, url, log_level)
-        self.track_story(status, story)
-
-    def track_story(self, status: str, story: BaseStory) -> None:
-        rss = story.rss_entry()
-        cmd = story.content_metadata()
-        crumb = PipeviewBreadcrumbV1(
-            feed_id=rss.source_feed_id,
-            source_id=rss.source_source_id,
-            domain=cmd.canonical_domain,
-            app=self.process_name,
-            status=status,
-            date=time.strftime("%Y-%m-%d", time.gmtime()),
-        )
-        self.queue_breadcrumb(cast(dict, crumb))
+        if story:
+            rss = story.rss_entry()
+            cmd = story.content_metadata()
+            crumb = self.make_crumb(
+                feed_id=rss.source_feed_id,
+                source_id=rss.source_source_id,
+                domain=cmd.canonical_domain,
+                status=status,
+            )
+        if crumb:
+            self.queue_breadcrumb(crumb)
 
     def check_story_length(self, html: bytes, url: str) -> bool:
         """
@@ -493,7 +498,7 @@ class StoryProducer(StoryMixin, Producer):
             self.quit(0)
 
     def quit(self, status: int) -> None:
-        self._send_crumbs()
+        # XXX flush breadcrumb_queue?
         sys.exit(status)
 
     def _batch_size(self) -> int:
@@ -538,7 +543,6 @@ class ShufflingStoryProducer(StoryProducer):
         """
         if self.sender is not None:
             self.sender.flush()
-            self._send_crumbs()
 
     def quit(self, status: int) -> None:
         """
@@ -751,7 +755,6 @@ class BatchStoryWorker(StoryWorker):
             last_msg = msgs[-1]
             assert last_msg
             self._ack_and_commit(last_msg, multiple=True)
-            self._send_crumbs()
             msg_number = 1
             msgs = []
 
