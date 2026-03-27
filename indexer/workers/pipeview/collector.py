@@ -18,7 +18,7 @@ from indexer.storyapp import StoryMixin
 from indexer.worker import InputMessage, Worker
 
 # local dir:
-from indexer.workers.pipeview.models import Base, Crumb  # CRUMB_UNIQUE_KEYS,
+from indexer.workers.pipeview.models import CRUMB_UNIQUE_KEYS, Base, Crumb
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +99,7 @@ class Collector(Worker):  # NOT a StoryWorker!
 
                 # an "upsert" that increments!
                 incsert_stmt = insert_stmt.on_conflict_do_update(
-                    # see if needed!!!
-                    # index_elements=CRUMB_UNIQUE_KEYS,
+                    index_elements=CRUMB_UNIQUE_KEYS,
                     # could replace 1 with insert_stmt.excluded.count
                     # if passed list of deduped rows with count:
                     set_={"count": Crumb.count + 1},
