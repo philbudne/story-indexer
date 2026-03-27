@@ -8,9 +8,9 @@ import logging
 import os
 
 # PyPI
-import sqlalchemy.orm as orm
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import sessionmaker
 
 # story-indexer/indexer
 from indexer.app import AppException, run
@@ -18,11 +18,7 @@ from indexer.storyapp import StoryMixin
 from indexer.worker import InputMessage, Worker
 
 # local dir:
-from indexer.workers.pipeview.models import Crumb
-
-# Used to get columns for INSERT ... ON CONFLICT
-CRUMB_TABLE = "crumb"
-CRUMB_UNIQUE = "crumb_unique"
+from indexer.workers.pipeview.models import Base, Crumb  # CRUMB_UNIQUE_KEYS,
 
 logger = logging.getLogger(__name__)
 
@@ -46,22 +42,11 @@ class Collector(Worker):  # NOT a StoryWorker!
         # pool_size? echo??
         self.engine = create_engine(database_url)
 
-        # factory for SesionType with presupplied parameters:
-        self.session_factory = orm.sessionmaker(bind=self.engine)
+        # create tables (if not previously existing)
+        Base.metadata.create_all(self.engine)
 
-        inspector = inspect(self.engine)
-        for index in inspector.get_indexes(CRUMB_TABLE):
-            if index["name"] == CRUMB_UNIQUE and index["unique"]:
-                self.unique_columns: list[str] = []
-                # is typed list[str | None]:
-                for c in index["column_names"]:
-                    if isinstance(c, str):
-                        self.unique_columns.append(c)
-                assert len(self.unique_columns) > 0
-                logger.info("crumb unique columns: %r", self.unique_columns)
-                break
-        else:
-            raise AppException(f"could not find {CRUMB_TABLE} index {CRUMB_UNIQUE}")
+        # factory for Sesion with presupplied parameters:
+        self.session_factory = sessionmaker(bind=self.engine)
 
     def process_message(self, im: InputMessage) -> None:
         """
@@ -95,26 +80,32 @@ class Collector(Worker):  # NOT a StoryWorker!
                         logger.info("breadcrumbs too new: %r", version)
                         return
                     continue
+            # XXX handle old version crumbs?
+            # XXX discard if "date" too old!!!!
             rows.append(j)
 
-        # XXX handle old version crumbs?
-        # XXX counter!!
-
         with self.session_factory() as session:
-            # no need to wrap in a try??
             session.begin()
+
+            # can't pass all the rows at once to insert/increment (it
+            # accepts a list of dicts) because more than one may have
+            # same set of keys, _COULD_ coalesce them up front (via a
+            # Counter indexed by a tuple (or frozendict) of the crumb
+            # columns), but mindful of Knuth's warning, not doing
+            # that for now:
+
             for row in rows:
+                insert_stmt = insert(Crumb).values(row)
+
                 # an "upsert" that increments!
-                # can't pass all the rows at once because
-                # more than one may have same set of keys
-                incsert_stmt = (
-                    insert(Crumb)
-                    .values(row)
-                    .on_conflict_do_update(
-                        index_elements=self.unique_columns,
-                        set_={"count": Crumb.count + 1},
-                    )
+                incsert_stmt = insert_stmt.on_conflict_do_update(
+                    # see if needed!!!
+                    # index_elements=CRUMB_UNIQUE_KEYS,
+                    # could replace 1 with insert_stmt.excluded.count
+                    # if passed list of deduped rows with count:
+                    set_={"count": Crumb.count + 1},
                 )
+                # no need to wrap in a try??
                 result = session.execute(incsert_stmt)
                 result.close()
             session.commit()

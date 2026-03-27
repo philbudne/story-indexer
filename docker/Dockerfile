@@ -36,7 +36,6 @@ RUN chmod +x ${APP_DOCKER}/bin/*
 
 COPY ../indexer ${APP_DOCKER}/indexer/
 COPY ../conf/elasticsearch/templates ${APP_DOCKER}/conf/elasticsearch/templates
-COPY ../conf/pipeview-db/init-ro-user.sql /docker-entrypoint-initdb.d/init-ro-user.sql
 
 # pass the executable as ARG and use it in CMD
 ARG RUN

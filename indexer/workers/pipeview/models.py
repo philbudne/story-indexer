@@ -14,24 +14,21 @@ class Base(DeclarativeBase):
     pass
 
 
-# NOTE! column names currently match items in indexer.storyapp.PipeviewBreadcrumbV1!!
-# DEPENDS on insert conflict, so the primary key is wide.
+# MUST have composite unique index
+# for UPDATE ... ON CONFLICT "incsert" to function properly!!
+CRUMB_UNIQUE_KEYS = ["date", "feed_id", "source_id", "domain", "app", "status"]
 
 
 class Crumb(Base):
     """
-    may need (many) additional indices to support query patterns,
-    but that's left to alembic to manage.
-
-    MUST have composite unique index named "crumb_unique"
-    for UPDATE ... ON CONFLICT "incsert" to function properly!!
+    NOTE! column names currently match items sent in JSON breadcrumb messages!
     """
 
     __tablename__ = "crumb"
 
     id = mapped_column(sa.BigInteger, primary_key=True, autoincrement=True)
 
-    # YYYY-MM-DD:
+    # YYYY-MM-DD
     date = mapped_column(sa.String, nullable=False)
 
     feed_id = mapped_column(sa.BigInteger)
@@ -46,4 +43,14 @@ class Crumb(Base):
     status = mapped_column(sa.String, nullable=False)
 
     # incremented for each matching breadcrumb:
-    count = mapped_column(sa.BigInteger, nullable=False, server_default="1")
+    count = mapped_column(sa.BigInteger, nullable=False)
+
+    __table_args__ = (
+        sa.Index(
+            "ix_crumb_unique",
+            *CRUMB_UNIQUE_KEYS,  # index columns
+            unique=True,
+            # necessary to treat rows with NULL keys as identical
+            postgresql_nulls_not_distinct=True
+        ),
+    )
