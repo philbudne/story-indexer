@@ -349,7 +349,7 @@ class QApp(App):
         logger.info(f"connected to {url}")
 
         if self.BREADCRUMB_VERSION:
-            self._breadcrumb_chan = self.connection.channel()
+            self._breadcrumb_channel = self.connection.channel()
 
         # start Pika I/O thread (ONLY ONE!)
         if self.START_PIKA_THREAD:
