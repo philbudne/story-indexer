@@ -243,11 +243,11 @@ class Pipeline(QApp):
         def qbind(dest_queue: str, ename: str, routing_key: str) -> None:
             # XXX make routing_key optional?
             if create:
-                logger.debug(f" binding queue {dest_queue_name} to exchange {ename}")
-                chan.queue_bind(dest_queue_name, ename, routing_key=routing_key)
+                logger.debug(f" binding queue {dest_queue} to exchange {ename}")
+                chan.queue_bind(dest_queue, ename, routing_key=routing_key)
             else:
-                logger.debug(f" unbinding queue {dest_queue_name} to exchange {ename}")
-                chan.queue_unbind(dest_queue_name, ename, routing_key=routing_key)
+                logger.debug(f" unbinding queue {dest_queue} to exchange {ename}")
+                chan.queue_unbind(dest_queue, ename, routing_key=routing_key)
 
         #### _configure function body:
 
@@ -293,7 +293,6 @@ class Pipeline(QApp):
         # _could_ declare max queue size (and drop) at creation or via policy
         exchange(BREADCRUMB_EXCHANGE)
         pipeview_in = input_queue_name("pipeview")
-        print("***", BREADCRUMB_EXCHANGE, pipeview_in)
         queue(pipeview_in)
         qbind(pipeview_in, BREADCRUMB_EXCHANGE, DEFAULT_ROUTING_KEY)
 
