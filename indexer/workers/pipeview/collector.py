@@ -102,19 +102,24 @@ class Collector(Worker):  # NOT a StoryWorker!
         # XXX handle old version crumbs?
         # XXX counter!!
 
-        # an "upsert" that increments!
-        incsert_stmt = (
-            insert(Crumb)
-            .values(rows)
-            .on_conflict_do_update(
-                index_elements=self.unique_columns, set_={"count": Crumb.count + 1}
-            )
-        )
-
         with self.session_factory() as session:
             # XXX probably need to wrap in a try!!!
-            result = session.execute(incsert_stmt)
-        logger.info("incsert result %r", result)
+            session.begin()
+            for row in rows:
+                # an "upsert" that increments!
+                # can't pass all the rows at once because
+                # more than one may have same set of keys
+                incsert_stmt = (
+                    insert(Crumb)
+                    .values(row)
+                    .on_conflict_do_update(
+                        index_elements=self.unique_columns,
+                        set_={"count": Crumb.count + 1},
+                    )
+                )
+                result = session.execute(incsert_stmt)
+                logger.info("incsert result %r", result)
+            session.commit()
 
 
 if __name__ == "__main__":
