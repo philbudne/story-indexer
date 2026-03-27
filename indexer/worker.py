@@ -589,22 +589,30 @@ class QApp(App):
             was_empty = len(self._breadcrumb_queue) == 0
             self._breadcrumb_queue.append(text)
 
+        logger.info("queue_breadcrumb was_empty %r conn %r", was_empty, self.connection)
         if was_empty and self.connection:
-            # start timer after first crumb queued:
-            self.connection.call_later(self.BREADCRUMB_DELAY, self._crumb_sender)
+            # start timer after first crumb queued
+            self.connection.call_later(self.BREADCRUMB_DELAY, self._crumb_timeout)
 
-    def _crumb_sender(self) -> None:
+    def _crumb_timeout(self) -> None:
         """
-        called in pika thread via connection.call_later
+        called BREADCRUMB_DELAY seconds
         after first crumb added to breadcrumb_queue
         """
+        logger.info("_crumb_timeout")
+        self._call_in_pika_thread(self._crumb_publish)
+
+    def _crumb_publish(self) -> None:
+        """
+        called in pika thread from _crumb_timeout
+        """
         if not self.BREADCRUMB_VERSION:
-            logger.info("_crumb_sender no version")
+            logger.info("_crumb_publish no version")
             return
 
         # mypy paranoia
         if self._breadcrumb_channel is None:
-            logger.info("_crumb_sender no channel")
+            logger.info("_crumb_publish no channel")
             return
 
         # use lock to empty atomically
@@ -612,11 +620,11 @@ class QApp(App):
         with self._breadcrumb_queue_lock:
             crumbs = self._breadcrumb_queue
             if not crumbs:
-                logger.info("_crumb_sender no crumbs")
+                logger.info("_crumb_publish no crumbs")
                 return  # should not happen
             self._breadcrumb_queue = []
 
-        logger.info("_crumb_sender %d crumbs", len(crumbs))
+        logger.info("_crumb_publish %d crumbs", len(crumbs))
         crumbs.insert(
             0, json.dumps({"version": self.BREADCRUMB_VERSION, "sent_at": time.time()})
         )
@@ -627,7 +635,7 @@ class QApp(App):
                 BREADCRUMB_EXCHANGE, DEFAULT_ROUTING_KEY, msg
             )
         else:
-            logger.info("_crumb_sender no channel")
+            logger.info("_crumb_publish no channel")
 
 
 class Worker(QApp):
