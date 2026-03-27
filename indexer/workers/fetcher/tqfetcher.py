@@ -428,7 +428,7 @@ class Fetcher(MultiThreadStoryWorker):
 
             status, url, id = self.get_id(story)
             if status != "ok":
-                self.incr_stories(status, url)
+                self.incr_stories(status, url, story=story)
                 self._pika_ack_and_commit(im)  # drop (ack without requeuing)
                 return
 
@@ -477,7 +477,7 @@ class Fetcher(MultiThreadStoryWorker):
         istatus, url, id = self.get_id(story)
         if istatus != "ok":
             logger.warning("get_id returned ('%s', '%s')", istatus, id)
-            self.incr_stories(istatus, id)
+            self.incr_stories(istatus, id, story=story)
             return
 
         assert self.scoreboard is not None
@@ -519,7 +519,7 @@ class Fetcher(MultiThreadStoryWorker):
                 requests.exceptions.InvalidURL,
             ) as exc:
                 logger.info("%s: %r", url, exc)
-                self.incr_stories("badurl2", url)
+                self.incr_stories("badurl2", url, story=story)
                 # bad URL, did not attempt connection, so don't mark domain as down!
                 conn_status = ConnStatus.BADURL  # used in finally
                 return  # discard: do not pass go, do not collect $200!
@@ -547,7 +547,7 @@ class Fetcher(MultiThreadStoryWorker):
                 )
 
         if resp is None:
-            self.incr_stories(fret.counter, url)
+            self.incr_stories(fret.counter, url, story=story)
             if fret.quarantine:
                 raise QuarantineException(fret.counter)
             return
@@ -563,7 +563,7 @@ class Fetcher(MultiThreadStoryWorker):
                 self.incr_stories(counter, url)
                 raise Retry(msg)
             else:
-                return self.incr_stories(counter, msg)
+                return self.incr_stories(counter, msg, story=story)
         # here with status == 200
         content = resp.content  # bytes
         lcontent = len(content)
@@ -584,9 +584,9 @@ class Fetcher(MultiThreadStoryWorker):
             or ct.startswith("application/vnd.wap.xhtml+xml")
             or not ct
         ):
-            return self.incr_stories("not-text", url)
+            return self.incr_stories("not-text", url, story=story)
 
-        if not self.check_story_length(content, url):
+        if not self.check_story_length(content, url):  # XXX counters!!
             return  # logged and counted
 
         final_url = resp.url

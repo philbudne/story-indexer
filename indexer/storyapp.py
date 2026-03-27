@@ -132,6 +132,12 @@ class StoryMixin(AppProtocol):
         """
         Should be called exactly once for each Story processed.
         default level is INFO so logs track disposition of every story.
+
+        story (or crumb if no Story object yet available) should
+        (currently) ONLY be passed for the final (no retries will
+        occur) disposition of a story, but NOT successful completion
+        in intermediate workers.  Passing an indicator that it's a
+        retryable event _MIGHT_ be possible/useful.
         """
         # All stats are prefixed by app name, so visible as
         # counters.mc.APP.stories.status_X or across all apps as
