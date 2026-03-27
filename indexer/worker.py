@@ -599,10 +599,12 @@ class QApp(App):
         after first crumb added to breadcrumb_queue
         """
         if not self.BREADCRUMB_VERSION:
+            logger.info("_crumb_sender no version")
             return
 
         # mypy paranoia
         if self._breadcrumb_channel is None:
+            logger.info("_crumb_sender no channel")
             return
 
         # use lock to empty atomically
@@ -610,17 +612,22 @@ class QApp(App):
         with self._breadcrumb_queue_lock:
             crumbs = self._breadcrumb_queue
             if not crumbs:
+                logger.info("_crumb_sender no crumbs")
                 return  # should not happen
             self._breadcrumb_queue = []
 
+        logger.info("_crumb_sender %d crumbs", len(crumbs))
         crumbs.insert(
             0, json.dumps({"version": self.BREADCRUMB_VERSION, "sent_at": time.time()})
         )
-        msg = "\n".join(crumbs).encode("utf-8")
         if self._breadcrumb_channel:  # mypy paranoia
+            # default is transient: not written to disk
+            msg = "\n".join(crumbs).encode("utf-8")
             self._breadcrumb_channel.basic_publish(
                 BREADCRUMB_EXCHANGE, DEFAULT_ROUTING_KEY, msg
             )
+        else:
+            logger.info("_crumb_sender no channel")
 
 
 class Worker(QApp):
