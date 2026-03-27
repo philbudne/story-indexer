@@ -95,15 +95,13 @@ class Collector(Worker):  # NOT a StoryWorker!
                         logger.info("breadcrumbs too new: %r", version)
                         return
                     continue
-
-            logger.info("crumb: %r", j)
             rows.append(j)
 
         # XXX handle old version crumbs?
         # XXX counter!!
 
         with self.session_factory() as session:
-            # XXX probably need to wrap in a try!!!
+            # no need to wrap in a try??
             session.begin()
             for row in rows:
                 # an "upsert" that increments!
@@ -118,7 +116,7 @@ class Collector(Worker):  # NOT a StoryWorker!
                     )
                 )
                 result = session.execute(incsert_stmt)
-                logger.info("incsert result %r", result)
+                result.close()
             session.commit()
 
 

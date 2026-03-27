@@ -589,7 +589,6 @@ class QApp(App):
             was_empty = len(self._breadcrumb_queue) == 0
             self._breadcrumb_queue.append(text)
 
-        logger.info("queue_breadcrumb was_empty %r conn %r", was_empty, self.connection)
         if was_empty and self.connection:
             # start timer after first crumb queued
             self.connection.call_later(self.BREADCRUMB_DELAY, self._crumb_timeout)
@@ -599,7 +598,6 @@ class QApp(App):
         called BREADCRUMB_DELAY seconds
         after first crumb added to breadcrumb_queue
         """
-        logger.info("_crumb_timeout")
         self._call_in_pika_thread(self._crumb_publish)
 
     def _crumb_publish(self) -> None:
