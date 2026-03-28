@@ -91,7 +91,7 @@ class PipeViewAPI(App):
 
     def main_loop(self) -> None:
         assert self.args
-        uvicorn.run(app, host="0.0.0.0", port=self.args.port, log_config=None)
+        uvicorn.run(app, host="0.0.0.0", port=self.args.api_port, log_config=None)
 
 
 if __name__ == "__main__":
