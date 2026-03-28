@@ -477,6 +477,9 @@ services:
       <<: *worker-environment-vars
       RUN: pipeview-api
       DATABASE_URL: {{pipeview_database_url}}
+      PIPEVIEW_API_PORT: {{pipeview_api_port}}
+    ports:
+      - "{{pipeview_api_port_exported}}:{{pipeview_api_port}}"
 
 {% macro define_volume(prefix, suffix='') %}
   {{prefix}}{{suffix}}:
