@@ -459,13 +459,23 @@ services:
       - pipeview_db:/var/lib/postgresql/data
 
   # a QApp; needs RABBITMQ_URL, STATSD_{REALM,URL}:
-  pipeview-worker:
+  pipeview-collector:
     <<: *worker-service-settings
     deploy:
       <<: *worker-deploy-settings
     environment:
       <<: *worker-environment-vars
-      RUN: pipeview
+      RUN: pipeview-collector
+      DATABASE_URL: {{pipeview_database_url}}
+
+  # doesn't need RABBITMQ_URL
+  pipeview-api:
+    <<: *worker-service-settings
+    deploy:
+      <<: *worker-deploy-settings
+    environment:
+      <<: *worker-environment-vars
+      RUN: pipeview-api
       DATABASE_URL: {{pipeview_database_url}}
 
 {% macro define_volume(prefix, suffix='') %}

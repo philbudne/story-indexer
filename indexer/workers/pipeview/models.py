@@ -4,6 +4,8 @@ SQLAlchemy table definitions
 Using full ORM/Declarative declarations
 """
 
+from typing import Literal, TypeAlias, get_args
+
 # PyPI:
 import sqlalchemy as sa
 from sqlalchemy.orm import DeclarativeBase, mapped_column
@@ -16,7 +18,11 @@ class Base(DeclarativeBase):
 
 # MUST have composite unique index
 # for UPDATE ... ON CONFLICT "incsert" to function properly!!
-CRUMB_UNIQUE_KEYS = ["date", "feed_id", "source_id", "domain", "app", "status"]
+
+CrumbKey: TypeAlias = Literal["date", "feed_id", "source_id", "domain", "app", "status"]
+
+# can't define Literal in terms of dynamic data, so extract list from Literal:
+CRUMB_UNIQUE_KEYS = get_args(CrumbKey)
 
 
 class Crumb(Base):

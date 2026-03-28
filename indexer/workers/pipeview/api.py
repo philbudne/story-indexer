@@ -2,7 +2,9 @@
 API server for pipeview database
 """
 
+import argparse
 import logging
+import os
 
 # PyPI:
 import uvicorn
@@ -14,17 +16,11 @@ from sqlalchemy.ext.asyncio.session import async_sessionmaker
 from indexer.app import App
 
 # local directory:
-from indexer.workers.pipeview.models import CRUMB_UNIQUE_KEYS, Crumb
+from indexer.workers.pipeview.models import Crumb, CrumbKey
 
 logger = logging.getLogger("pipeview-api")
 
-# TEMP!!!! External port number for a dev indexer stack:
-DATABASE_URL = "postgresql+psycopg://postgres:123454321@127.0.0.1:54340/pipeview"
-
-app = FastAPI(
-    title="PipeView",
-    description="Look inside story-indexer pipeline",
-)
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 # pool_size, echo??
 async_engine = create_async_engine(DATABASE_URL)
@@ -32,24 +28,34 @@ async_engine = create_async_engine(DATABASE_URL)
 # https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html#preventing-implicit-io-when-using-asyncsession
 AsyncSession = async_sessionmaker(async_engine, expire_on_commit=False)
 
+app = FastAPI(
+    title="PipeView",
+    description="Look inside story-indexer pipeline",
+)
+
+# XXX avoid having all rows in memory by creating new endpoint w/:
+#        async def generator(stream):
+#            async for row in stream:
+#                yield json.dumps(row._asdict()) + "\n"
+#        results = await session.stream(query)
+#        return StreamingReponse(generator(results), media_type="application/x-ndjson")
+
 
 @app.get("/sum/")
 async def sum(
-    cols: str,  # comma separated list of column names
+    col: list[CrumbKey] = Query(default=[]),
     # filters
-    source_id: int | None = Query(default=None),
-    feed_id: int | None = Query(default=None),
-    domain: str | None = Query(default=None),
-    app: str | None = Query(default=None),
-    status: str | None = Query(default=None),
-    # pagination
-    # skip: int = Query(default=0),
-    # limit: int = Query(default=10),
+    source_id: int | None = Query(None),
+    feed_id: int | None = Query(None),
+    domain: str | None = Query(None),
+    app: str | None = Query(None),
+    status: str | None = Query(None),
+    # pagination (requires ordered results!!)
+    # skip: int = Query(0),
+    # limit: int = Query(1000),
 ) -> list[dict[str, int | str | None]]:
-    columns = [
-        getattr(Crumb, c).label(c) for c in cols.split(",") if c in CRUMB_UNIQUE_KEYS
-    ]
-    query = select(*columns, func.sum(Crumb.count).label("count"))
+    columns = [getattr(Crumb, c) for c in col]
+    query = select(*columns, func.sum(Crumb.count), func.count(Crumb.id))
 
     # apply filters
     if source_id is not None:
@@ -65,10 +71,11 @@ async def sum(
         query = query.where(Crumb.status == status)
 
     query = query.group_by(*columns)
+    # need order_by if paginating
+
     async with AsyncSession() as session:
-        results = await session.execute(query)
         # row is sqlalchemy.engine.row.Row
-        return [row._asdict() for row in results]
+        return [row._asdict() for row in await session.execute(query)]
 
 
 class PipeViewAPI(App):
@@ -76,10 +83,15 @@ class PipeViewAPI(App):
     Indexer app: initializes logging, stats
     """
 
-    # XXX take args for host & port, default from environment??
+    def define_options(self, ap: argparse.ArgumentParser) -> None:
+        super().define_options(ap)
+        ap.add_argument(
+            "--api-port", type=int, default=os.environ.get("PIPEVIEW_API_PORT", 8000)
+        )
 
     def main_loop(self) -> None:
-        uvicorn.run(app, host="0.0.0.0", port=8888, log_config=None)
+        assert self.args
+        uvicorn.run(app, host="0.0.0.0", port=self.args.port, log_config=None)
 
 
 if __name__ == "__main__":
