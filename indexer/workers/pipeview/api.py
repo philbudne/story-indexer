@@ -79,7 +79,7 @@ class PipeViewAPI(App):
     # XXX take args for host & port, default from environment??
 
     def main_loop(self) -> None:
-        uvicorn.run(app, host="0.0.0.0", port=8888)
+        uvicorn.run(app, host="0.0.0.0", port=8888, log_config=None)
 
 
 if __name__ == "__main__":
