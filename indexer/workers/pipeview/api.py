@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio.session import async_sessionmaker
 from indexer.app import App
 
 # local directory:
-from indexer.workers.pipeview.models import Crumb
+from indexer.workers.pipeview.models import CRUMB_UNIQUE_KEYS, Crumb
 
 logger = logging.getLogger("pipeview-api")
 
@@ -46,8 +46,9 @@ async def sum(
     # skip: int = Query(default=0),
     # limit: int = Query(default=10),
 ) -> list[dict[str, int | str | None]]:
-    # XXX validate column names using models.CRUMB_UNIQUE_KEYS??
-    columns = [getattr(Crumb, c).label(c) for c in cols.split(",")]
+    columns = [
+        getattr(Crumb, c).label(c) for c in cols.split(",") if c in CRUMB_UNIQUE_KEYS
+    ]
     query = select(*columns, func.sum(Crumb.count).label("count"))
 
     # apply filters
@@ -56,7 +57,8 @@ async def sum(
     if feed_id is not None:
         query = query.where(Crumb.feed_id == feed_id)
     if domain is not None:
-        query = query.where(Crumb.domain == domain)
+        # treat empty string as NULL
+        query = query.where(Crumb.domain == (domain or None))
     if app is not None:
         query = query.where(Crumb.app == app)
     if status is not None:
