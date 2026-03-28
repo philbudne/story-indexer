@@ -605,12 +605,10 @@ class QApp(App):
         called in pika thread from _crumb_timeout
         """
         if not self.BREADCRUMB_VERSION:
-            logger.info("_crumb_publish no version")
             return
 
         # mypy paranoia
         if self._breadcrumb_channel is None:
-            logger.info("_crumb_publish no channel")
             return
 
         # use lock to empty atomically
@@ -618,7 +616,6 @@ class QApp(App):
         with self._breadcrumb_queue_lock:
             crumbs = self._breadcrumb_queue
             if not crumbs:
-                logger.info("_crumb_publish no crumbs")
                 return  # should not happen
             self._breadcrumb_queue = []
 

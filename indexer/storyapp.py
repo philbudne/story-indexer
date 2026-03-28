@@ -158,7 +158,7 @@ class StoryMixin(AppProtocol):
                 status=status,
             )
         if crumb:
-            logger.info("queue breadcrumb %r", crumb)
+            # logger.info("queue breadcrumb %r", crumb)
             self.queue_breadcrumb(crumb)
 
     def check_story_length(self, html: bytes, url: str) -> bool:
