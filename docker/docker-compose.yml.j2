@@ -119,6 +119,7 @@ x-worker-service-settings: &worker-service-settings
 
   environment: &worker-environment-vars
     <<: *base-environment-vars
+    BREADCRUMB_EXCHANGE: {{breadcrumb_exchange}}
     DEPLOYMENT_ID: {{deployment_id}}
     ELASTICSEARCH_HOSTS: {{elasticsearch_hosts}}
     ELASTICSEARCH_CONFIG_DIR: {{elasticsearch_config_dir}}

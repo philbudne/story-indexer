@@ -282,6 +282,7 @@ class ElasticsearchImporter(ElasticConfMixin, StoryWorker):
             # exception was thrown, so should only be here if HTTP returned 200.
             # PARANOIA! create() call always returns ObjectApiResponse.
             if not response:
+                self.incr_stories("noresp", url, story=story)
                 raise QuarantineException(f"response {response!r}")
 
             # Always count, and be explicit about what we saw.  Only documented result

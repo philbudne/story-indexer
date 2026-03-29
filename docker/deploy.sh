@@ -433,6 +433,10 @@ dev)
     ;;
 esac
 
+case "$PIPELINE_TYPE" in
+batch-fetcher|queue-fetcher)
+    BREADCRUMB_EXCHANGE=breadcrumb;;
+esac
 
 # NOTE! in-network containers see native (unmapped) ports,
 # so set environment variable values BEFORE applying PORT_BIAS!!
@@ -676,6 +680,7 @@ add ARCHIVER_S3_BUCKET		   # private
 add ARCHIVER_S3_REGION allow-empty # private: empty to disable
 add ARCHIVER_S3_SECRET_ACCESS_KEY  # private
 add ARCHIVER_S3_ACCESS_KEY_ID	   # private
+add BREADCRUMB_EXCHANGE allow-empty # empty to disable
 add DEPLOYMENT_BRANCH		   # for context
 add DEPLOYMENT_DATE_TIME	   # for context
 add DEPLOYMENT_GIT_HASH		   # for context

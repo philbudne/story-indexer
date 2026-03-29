@@ -46,10 +46,6 @@ msglogger = logging.getLogger(__name__ + ".msgs")
 DEFAULT_EXCHANGE = ""  # routes to queue named by routing key
 DEFAULT_ROUTING_KEY = "default"
 
-# breadcrumbs are small JSON messages sent to summarize message paths
-# format must be defined by subclasses (see storyapp.StoryMixin)
-BREADCRUMB_EXCHANGE = "breadcrumbs"
-
 # default consumer timeout (for ack) is 30 minutes:
 # https://www.rabbitmq.com/consumers.html#acknowledgement-timeout
 CONSUMER_TIMEOUT_SECONDS = 30 * 60
@@ -231,6 +227,9 @@ class QApp(App):
 
         self.sent_messages = 0
 
+        # breadcrumbs are small JSON messages sent to summarize message processing.
+        # format must be defined by subclasses (see storyapp.StoryMixin)
+        self._breadcrumb_exchange: Optional[str] = os.environ.get("BREADCRUMB_EXCHANGE")
         self._breadcrumb_channel: Optional[BlockingChannel] = None
         self._breadcrumb_queue_lock = threading.Lock()
         self._breadcrumb_queue: list[str] = []
@@ -351,7 +350,8 @@ class QApp(App):
         self.connection = BlockingConnection(URLParameters(url))
         logger.info(f"connected to {url}")
 
-        if self.BREADCRUMB_VERSION:
+        if self.BREADCRUMB_VERSION and self._breadcrumb_exchange:
+            logger.info("sending crumbs to %s exchange", self._breadcrumb_exchange)
             self._breadcrumb_channel = self.connection.channel()
 
         # start Pika I/O thread (ONLY ONE!)
@@ -609,7 +609,7 @@ class QApp(App):
         """
         called in pika thread from _crumb_timeout
         """
-        if not self.BREADCRUMB_VERSION:
+        if not (self.BREADCRUMB_VERSION and self._breadcrumb_exchange):
             return
 
         # mypy paranoia
@@ -633,7 +633,7 @@ class QApp(App):
         self._send_message(
             chan=self._breadcrumb_channel,
             data="\n".join(crumbs).encode("utf-8"),
-            exchange=BREADCRUMB_EXCHANGE,
+            exchange=self._breadcrumb_exchange,
             routing_key=DEFAULT_ROUTING_KEY,
             persistent=False,  # do not write to disk
         )
@@ -773,6 +773,10 @@ class Worker(QApp):
         except QuarantineException as e:
             status = "error"
             self._quarantine(im, e)
+            # remove story arg from incr_stats call and call
+            # self.retries_exhausted() here???  (if done, can remove
+            # story/crumb arguments to incr_story calls before raising
+            # QuarantineException)
         except RequeueException:
             status = "requeue"
             self._requeue(im)
@@ -794,7 +798,8 @@ class Worker(QApp):
 
     def retries_exhausted(self) -> None:
         """
-        override to send a breadcrumb after last retry
+        Here when Story has been fully retried (heading for Quarantine or
+        drop).  Override to send a breadcrumb after last retry
         """
 
     def _ack_and_commit(self, im: InputMessage, multiple: bool = False) -> None:

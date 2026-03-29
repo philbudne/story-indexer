@@ -639,6 +639,7 @@ class StoryWorker(StoryMixin, Worker):
         self.tls.last_retry_status = None
         self.process_story(sender, story)
         self.tls.last_story = None
+        self.tls.last_retry_status = None
 
     def retries_exhausted(self) -> None:
         """
@@ -652,6 +653,9 @@ class StoryWorker(StoryMixin, Worker):
             self.queue_breadcrumb(
                 self.story_breadcrumb(self.tls.last_story, self.tls.last_retry_status)
             )
+        # paranoia:
+        self.tls.last_story = None
+        self.tls.last_retry_status = None
 
     def process_story(self, sender: StorySender, story: BaseStory) -> None:
         raise NotImplementedError("StoryWorker.process_story not overridden")
