@@ -63,6 +63,7 @@ class Collector(Worker):  # NOT a StoryWorker!
         rows: list[dict] = []
         first = True
         version = []
+        app = "unknown"
         for line in lines:
             try:
                 j = json.loads(line)
@@ -80,12 +81,15 @@ class Collector(Worker):  # NOT a StoryWorker!
                     if version[0] > StoryMixin.BREADCRUMB_VERSION[0]:
                         logger.info("breadcrumbs too new: %r", version)
                         return
+                    if "app" in j:
+                        app = j["app"]
                     continue
             # XXX handle old version crumbs?
             # XXX discard if "date" too old!!!!
             if "count" not in j:
                 j["count"] = 1
             rows.append(j)
+            self.incr("crumbs", labels=[("app", app)])
 
         with self.session_factory() as session:
             session.begin()
