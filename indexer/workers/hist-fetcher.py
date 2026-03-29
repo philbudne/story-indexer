@@ -185,7 +185,8 @@ class HistFetcher(StoryWorker):
             self.incr_stories("redundant", url or str(dlid))
             return
 
-        if not self.check_story_length(html, url):
+        if err := self.check_length(html):
+            self.incr_stories(err, url or str(dlid))  # XXX pass crumb?
             return  # counted and logged
 
         logger.info("%d %s: %d bytes", dlid, url, len(html))

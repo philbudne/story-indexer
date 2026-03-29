@@ -72,14 +72,18 @@ class HistQueuer(Queuer):
             url = row.get("url")
             if url_required:
                 if not isinstance(url, str) or not url:
+                    # XXX pass crumb?
                     self.incr_stories("bad-url", repr(url))
                     continue
 
                 if url in urls_seen:
+                    # XXX pass crumb?
                     self.incr_stories("dups", url)
                     continue
 
-                if not self.check_story_url(url):
+                if err := self.check_url(url):
+                    # XXX pass crumb?
+                    self.incr_stories(err, url)
                     continue  # logged and counted
             else:
                 url = NEED_CANONICAL_URL

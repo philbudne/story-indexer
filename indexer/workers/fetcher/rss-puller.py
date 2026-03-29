@@ -208,10 +208,12 @@ class RSSPuller(ShufflingStoryProducer):
             if not isinstance(url, str):
                 # don't muddy the stats if just a dry-run:
                 if not self.dry_run:
+                    # XXX pass crumb:
                     self.incr_stories("no-url", str(url))  # log and count
                 continue
 
-            if not self.check_story_url(url):
+            if err := self.check_url(url):
+                self.incr_stories(err, url)  # XXX pass crumb
                 continue  # logged and counted
 
             # reformat optional published_at (from original RSS file)

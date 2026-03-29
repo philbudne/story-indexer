@@ -3,7 +3,7 @@ Pipeline Worker Definitions.
 Written to be a generic utility package.
 Tries to hide Pika/RabbitMQ/AMQP as much as reasonably possible.
 
-Story-specific things are in storyworker.py
+Story-specific things are in storyapp.py
 """
 
 # NOTE!!!! This file has been CAREFULLY coded to NOT assume consumers
@@ -45,6 +45,9 @@ msglogger = logging.getLogger(__name__ + ".msgs")
 
 DEFAULT_EXCHANGE = ""  # routes to queue named by routing key
 DEFAULT_ROUTING_KEY = "default"
+
+# breadcrumbs are small JSON messages sent to summarize message paths:
+# format must be defined by subclasses (see storyapp.StoryMixin)
 BREADCRUMB_EXCHANGE = "breadcrumbs"
 
 # default consumer timeout (for ack) is 30 minutes:
@@ -774,6 +777,7 @@ class Worker(QApp):
                 status = "retry"
             else:
                 status = "retryx"  # retries eXausted
+                # XXX call method to send breadcrumb?!
 
         ms = 1000 * (time.monotonic() - t0)
         # NOTE! statsd timers have .count but not .rate

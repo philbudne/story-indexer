@@ -20,7 +20,7 @@ import time
 from typing import Dict, List, Optional, TypeAlias, TypedDict
 from urllib.parse import urlsplit
 
-from mcmetadata.urls import NON_NEWS_DOMAINS
+from mcmetadata.urls import is_non_news_domain
 from pika import BasicProperties
 from pika.adapters.blocking_connection import BlockingChannel
 
@@ -55,23 +55,6 @@ def url_fqdn(url: str) -> str:
     return hn.lower()
 
 
-def non_news_fqdn(fqdn: str) -> bool:
-    """
-    check if a FQDN (fully qualified domain name, ie; DNS name)
-    is (in) a domain embargoed as "non-news"
-
-    maybe belongs in  mcmetadata??
-    """
-    # could be written as "any" on a comprehension:
-    # looks like that's 15% slower in Python 3.10,
-    # and harder to for me to... comprehend!
-    fqdn = fqdn.lower()
-    for nnd in NON_NEWS_DOMAINS:
-        if fqdn == nnd or fqdn.endswith("." + nnd):
-            return True
-    return False
-
-
 class StoryMixin(AppProtocol):
     """
     The place for Story-specific methods for both
@@ -79,6 +62,7 @@ class StoryMixin(AppProtocol):
     """
 
     BAD_HOSTS = set(["localhost", "127.0.0.1", "[::1]"])
+    URL_SCHEMES = ("http", "https")  # _could_ test if set faster
     BREADCRUMB_VERSION = [1, 0, 0]  # version
 
     def define_options(self, ap: argparse.ArgumentParser) -> None:
@@ -160,35 +144,54 @@ class StoryMixin(AppProtocol):
         if crumb:
             # logger.info("queue breadcrumb %r", crumb)
             self.queue_breadcrumb(crumb)
+        # XXX else save last_status for retryx breadcrumbs??
 
-    def check_story_length(self, html: bytes, url: str) -> bool:
+    def check_story_length(self, story: BaseStory, html: bytes, url: str) -> bool:
         """
         check HTML length:
         False return means a counter has been incremented and URL logged
         and the Story should be discarded.
         """
-        if not html:
-            self.incr_stories("no-html", url)  # XXX incr_stories_track
+        err = self.check_length(html)
+        if err:
+            self.incr_stories(err, url, story=story)
             return False
-
-        if len(html) > MAX_HTML_BYTES:
-            self.incr_stories("oversized", url)  # XXX incr_stories_track
-            return False
-
         return True
 
-    def check_story_url(self, url: str) -> bool:
+    def check_length(self, html: bytes) -> str | None:
+        """
+        check HTML length w/o Story object
+        returns error string, or None if OK
+        """
+        if not html:
+            return "no-html"
+
+        if len(html) > MAX_HTML_BYTES:
+            return "oversized"
+
+        return None
+
+    def check_story_url(self, story: BaseStory, url: str) -> bool:
+        """
+        Check URL w/ Story object available
+        returns True if url good,
+        returns False w/ bad url, counted and logged
+        """
+        if err := self.check_url(url):
+            self.incr_stories(err, url, story=story)
+            return False
+        return True
+
+    def check_url(self, url: str) -> str | None:
         """
         check URL.
-        False return means a counter has been incremented and URL logged,
-        and the Story should be discarded.
+        returns error string if Story should be discarded.
 
         Ideally: call when queuing a new Story, and for each intermediate
         redirect URL while fetching.
         """
         if not url:
-            self.incr_stories("no-url", url)  # XXX incr_stories_track
-            return False
+            return "no-url"
 
         # XXX check for over-sized URL??
         # rss-fetcher's default limit is 2048
@@ -198,25 +201,22 @@ class StoryMixin(AppProtocol):
         try:
             surl = urlsplit(url, allow_fragments=False)
         except ValueError:
-            self.incr_stories("bad-url", url)  # XXX incr_stories_track
-            return False
+            return "bad-url"
 
         hostname = surl.hostname
         if not hostname:
-            self.incr_stories("no-host", url)  # XXX incr_stories_track
-            return False
+            return "no-host"
 
-        # check for schema?
+        if surl.scheme not in self.URL_SCHEMES:
+            return "bad-scheme"
 
-        if non_news_fqdn(hostname):
-            self.incr_stories("non-news", url)  # XXX incr_stories_track
-            return False
+        if is_non_news_domain(hostname):
+            return "non-news"
 
         if hostname in self.BAD_HOSTS:
-            self.incr_stories("bad-host", url)  # XXX incr_stories_track
-            return False
+            return "bad-host"
 
-        return True
+        return None
 
 
 class StorySender:
@@ -465,12 +465,13 @@ class StoryProducer(StoryMixin, Producer):
         assert self.args
 
         url = story.http_metadata().final_url or story.rss_entry().link or ""
-        if not self.check_story_url(url):
+        if err := self.check_url(url):
+            self.incr_stories(err, url, story=story)
             return  # logged and counted
 
         if check_html:
             html = story.raw_html().html or b""
-            if not self.check_story_length(html, url):
+            if not self.check_story_length(story, html, url):
                 return  # logged and counted
 
         level = logging.INFO
@@ -604,7 +605,7 @@ class StoryWorker(StoryMixin, Worker):
 
         # raised exceptions will cause retry; quarantine immediately?
         story = self.decode_story(im)
-
+        # XXX save copy for retryx breadcrumb? clear last status??
         self.process_story(sender, story)
 
     def process_story(self, sender: StorySender, story: BaseStory) -> None:

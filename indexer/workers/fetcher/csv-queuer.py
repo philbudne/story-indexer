@@ -42,7 +42,8 @@ class CSVQueuer(Queuer):
             logger.debug("%r", row)
 
             url = row[0]
-            if not self.check_story_url(url):
+            if err := self.check_url(url):
+                self.incr_stories(err, url)  # XXX pass crumb?
                 continue  # logged and counted
 
             if url in urls_seen:

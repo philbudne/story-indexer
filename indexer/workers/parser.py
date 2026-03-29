@@ -229,7 +229,7 @@ class Parser(StoryWorker):
 
         # now that we FINALLY have a URL, make sure it isn't
         # from a source we filter out!!!
-        if not self.check_story_url(canonical_url):
+        if not self.check_story_url(story, canonical_url):
             return False  # logged and counted
 
         with story.http_metadata() as hmd:
