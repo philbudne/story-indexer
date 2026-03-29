@@ -22,7 +22,6 @@ from pika.exchange_type import ExchangeType
 # local:
 from indexer.app import run
 from indexer.worker import (
-    BREADCRUMB_EXCHANGE,
     DEFAULT_ROUTING_KEY,
     QApp,
     base_queue_name,
@@ -291,10 +290,11 @@ class Pipeline(QApp):
         # NOTES:
         # queue is NOT durable (data not sync'ed to disk)
         # _could_ declare max queue size (and drop) at creation or via policy
-        exchange(BREADCRUMB_EXCHANGE)
-        pipeview_in = input_queue_name("pipeview")
-        queue(pipeview_in)
-        qbind(pipeview_in, BREADCRUMB_EXCHANGE, DEFAULT_ROUTING_KEY)
+        if self._breadcrumb_exchange:
+            exchange(self._breadcrumb_exchange)
+            pipeview_in = input_queue_name("pipeview")
+            queue(pipeview_in)
+            qbind(pipeview_in, self._breadcrumb_exchange, DEFAULT_ROUTING_KEY)
 
         if create:
             # create semaphore
