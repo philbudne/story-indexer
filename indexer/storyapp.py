@@ -147,10 +147,9 @@ class StoryMixin(AppProtocol):
         # could send to a sub-logger (__name__ + '.stories')
         logger.log(log_level, "%s: %s", status, url)
 
-        if story:  # overrides crumb, if any
+        if story:  # overrides supplied crumb, if any
             crumb = self.story_breadcrumb(story, status)
         if crumb:
-            # logger.info("queue breadcrumb %r", crumb)
             self.queue_breadcrumb(crumb)
 
     def check_story_length(self, story: BaseStory, html: bytes, url: str) -> bool:
@@ -642,9 +641,13 @@ class StoryWorker(StoryMixin, Worker):
         self.tls.last_story = None
 
     def retries_exhausted(self) -> None:
-        logger.info(
-            "retries_exhausted %r: %s", self.tls.last_story, self.tls.last_retry_status
-        )  # XXX TEMP
+        """
+        Here when a story about to be quarantined or dropped
+        (from exception handling in Worker._process_one_message)
+        """
+        # last_story set above in process_message,
+        # last_retry_status set by incr_stories
+        # (if NOT a final status report)
         if self.tls.last_story and self.tls.last_retry_status:
             self.queue_breadcrumb(
                 self.story_breadcrumb(self.tls.last_story, self.tls.last_retry_status)

@@ -215,7 +215,7 @@ class QApp(App):
     BREADCRUMB_VERSION: list[int] = []
 
     # delay to sending crumbs after first one queued:
-    BREADCRUMB_DELAY = 10.0
+    BREADCRUMB_DELAY = 60.0
 
     def __init__(self, process_name: str, descr: str):
         super().__init__(process_name, descr)
@@ -624,7 +624,6 @@ class QApp(App):
                 return  # should not happen
             self._breadcrumb_queue = []
 
-        logger.info("_crumb_publish %d crumbs", len(crumbs))
         vdict = {
             "version": self.BREADCRUMB_VERSION,
             "sent_at": time.time(),
