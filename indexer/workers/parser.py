@@ -144,10 +144,11 @@ class Parser(StoryWorker):
         """
         copy extracted metadata dict to Story object
         """
-        # XXX check for empty text_content?
-        # (will be quarantined by importer)
-
         cmd = story.content_metadata()
+        if not cmd.text_content:
+            self.incr_stories("no-text", self._log_url(story), story=story)
+            return False  # logged and counted: discard
+
         with cmd:
             for key, val in mdd.items():
                 if hasattr(cmd, key):  # avoid hardwired exceptions
