@@ -642,6 +642,9 @@ class StoryWorker(StoryMixin, Worker):
         self.tls.last_story = None
 
     def retries_exhausted(self) -> None:
+        logger.info(
+            "retries_exhausted %r: %s", self.tls.last_story, self.tls.last_retry_status
+        )  # XXX TEMP
         if self.tls.last_story and self.tls.last_retry_status:
             self.queue_breadcrumb(
                 self.story_breadcrumb(self.tls.last_story, self.tls.last_retry_status)
