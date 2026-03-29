@@ -145,10 +145,6 @@ class Parser(StoryWorker):
         copy extracted metadata dict to Story object
         """
         cmd = story.content_metadata()
-        if not cmd.text_content:
-            self.incr_stories("no-text", self._log_url(story), story=story)
-            return False  # logged and counted: discard
-
         with cmd:
             for key, val in mdd.items():
                 if hasattr(cmd, key):  # avoid hardwired exceptions
@@ -169,6 +165,10 @@ class Parser(StoryWorker):
         if cmd.is_homepage:
             self.incr_stories("homepage", self._log_url(story), story=story)
             return False
+
+        if not cmd.text_content:
+            self.incr_stories("no-text", self._log_url(story), story=story)
+            return False  # logged and counted: discard
 
         return True
 
