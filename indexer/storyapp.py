@@ -24,7 +24,7 @@ from mcmetadata.urls import is_non_news_domain
 from pika import BasicProperties
 from pika.adapters.blocking_connection import BlockingChannel
 
-from indexer.app import AppProtocol, IntervalMixin
+from indexer.app import AppProtocol, BreadCrumb, IntervalMixin
 from indexer.story import BaseStory
 from indexer.worker import (
     CONSUMER_TIMEOUT_SECONDS,
@@ -92,8 +92,9 @@ class StoryMixin(AppProtocol):
         source_id: int | None,
         domain: str | None,  # canonical_domain from parser
         status: str,
-    ) -> dict:
+    ) -> BreadCrumb:
         """
+        Make a story-based breadcrumb.
         These "just happen" to match the pipeview db columns
         """
         return {
@@ -105,13 +106,27 @@ class StoryMixin(AppProtocol):
             "status": status,
         }
 
+    def story_breadcrumb(self, story: BaseStory, status: str) -> BreadCrumb:
+        """
+        create a breadcrumb from a Story
+        """
+        rss = story.rss_entry()
+        cmd = story.content_metadata()
+        crumb = self.make_crumb(
+            feed_id=rss.source_feed_id,
+            source_id=rss.source_source_id,
+            domain=cmd.canonical_domain,
+            status=status,
+        )
+        return crumb
+
     def incr_stories(
         self,
         status: str,
         url: str,
         log_level: int = logging.INFO,
         story: BaseStory | None = None,
-        crumb: dict | None = None,
+        crumb: BreadCrumb | None = None,
     ) -> None:
         """
         Should be called exactly once for each Story processed.
@@ -132,19 +147,11 @@ class StoryMixin(AppProtocol):
         # could send to a sub-logger (__name__ + '.stories')
         logger.log(log_level, "%s: %s", status, url)
 
-        if story:
-            rss = story.rss_entry()
-            cmd = story.content_metadata()
-            crumb = self.make_crumb(
-                feed_id=rss.source_feed_id,
-                source_id=rss.source_source_id,
-                domain=cmd.canonical_domain,
-                status=status,
-            )
+        if story:  # overrides crumb, if any
+            crumb = self.story_breadcrumb(story, status)
         if crumb:
             # logger.info("queue breadcrumb %r", crumb)
             self.queue_breadcrumb(crumb)
-        # XXX else save last_status for retryx breadcrumbs??
 
     def check_story_length(self, story: BaseStory, html: bytes, url: str) -> bool:
         """
@@ -571,6 +578,11 @@ class ShufflingStoryProducer(StoryProducer):
         return int(self.args.shuffle_batch_size)
 
 
+class StoryWorkerTLS(threading.local):
+    last_retry_status: str | None
+    last_story: BaseStory | None
+
+
 class StoryWorker(StoryMixin, Worker):
     """
     Process Stories in Queue Messages
@@ -588,6 +600,25 @@ class StoryWorker(StoryMixin, Worker):
         # this would be necessary, so implement it now,
         # and avoid possible (if unlikely) surprise later.
         self.senders: Dict[BlockingChannel, StorySender] = {}
+        self.tls = StoryWorkerTLS()
+        self.tls.last_retry_status = None
+        self.tls.last_story = None
+
+    def incr_stories(
+        self,
+        status: str,
+        url: str,
+        log_level: int = logging.INFO,
+        story: BaseStory | None = None,
+        crumb: BreadCrumb | None = None,
+    ) -> None:
+        if story or crumb:
+            # story or crumb passed in means it's a final status
+            self.tls.last_retry_status = None
+        else:
+            # try to save last retryable status counted in case last retry
+            self.tls.last_retry_status = status
+        super().incr_stories(status, url, log_level, story, crumb)
 
     def decode_story(self, im: InputMessage) -> BaseStory:
         story = BaseStory.load(im.body)
@@ -605,8 +636,16 @@ class StoryWorker(StoryMixin, Worker):
 
         # raised exceptions will cause retry; quarantine immediately?
         story = self.decode_story(im)
-        # XXX save copy for retryx breadcrumb? clear last status??
+        self.tls.last_story = story
+        self.tls.last_retry_status = None
         self.process_story(sender, story)
+        self.tls.last_story = None
+
+    def retries_exhausted(self) -> None:
+        if self.tls.last_story and self.tls.last_retry_status:
+            self.queue_breadcrumb(
+                self.story_breadcrumb(self.tls.last_story, self.tls.last_retry_status)
+            )
 
     def process_story(self, sender: StorySender, story: BaseStory) -> None:
         raise NotImplementedError("StoryWorker.process_story not overridden")
@@ -643,6 +682,8 @@ class BatchStoryWorker(StoryWorker):
     """
     A worker processing batches of stories
     (all stories consumed at once)
+
+    NOTE: Has not (yet) been updated for breadcrumbs!
     """
 
     # Default values: just guesses, should be tuned.

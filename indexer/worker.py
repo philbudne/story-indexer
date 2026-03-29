@@ -36,7 +36,7 @@ from pika.connection import URLParameters
 from pika.spec import PERSISTENT_DELIVERY_MODE, Basic
 
 # story-indexer
-from indexer.app import App, AppException
+from indexer.app import App, AppException, BreadCrumb
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ msglogger = logging.getLogger(__name__ + ".msgs")
 DEFAULT_EXCHANGE = ""  # routes to queue named by routing key
 DEFAULT_ROUTING_KEY = "default"
 
-# breadcrumbs are small JSON messages sent to summarize message paths:
+# breadcrumbs are small JSON messages sent to summarize message paths
 # format must be defined by subclasses (see storyapp.StoryMixin)
 BREADCRUMB_EXCHANGE = "breadcrumbs"
 
@@ -583,7 +583,7 @@ class QApp(App):
             time.sleep(0.1)
         return False
 
-    def queue_breadcrumb(self, crumb: dict) -> None:
+    def queue_breadcrumb(self, crumb: BreadCrumb) -> None:
         assert self.BREADCRUMB_VERSION  # breadcrumbs enabled
         text = json.dumps(crumb)
         # queue.Queue is thread safe,
@@ -777,7 +777,7 @@ class Worker(QApp):
                 status = "retry"
             else:
                 status = "retryx"  # retries eXausted
-                # XXX call method to send breadcrumb?!
+                self.retries_exhausted()
 
         ms = 1000 * (time.monotonic() - t0)
         # NOTE! statsd timers have .count but not .rate
@@ -785,6 +785,11 @@ class Worker(QApp):
         msglogger.debug("processed #%s in %.3f ms, status: %s", tag, ms, status)
 
         return status == "ok"
+
+    def retries_exhausted(self) -> None:
+        """
+        override to send a breadcrumb after last retry
+        """
 
     def _ack_and_commit(self, im: InputMessage, multiple: bool = False) -> None:
         """
