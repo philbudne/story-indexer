@@ -510,6 +510,7 @@ class QApp(App):
         exchange: Optional[str] = None,
         routing_key: str = DEFAULT_ROUTING_KEY,
         properties: Optional[BasicProperties] = None,  # WILL BE MODIFIED!
+        persistent: bool = True,
     ) -> None:
         """
         called by Worker/Publisher code in main thread.
@@ -519,13 +520,14 @@ class QApp(App):
         if exchange is None:
             exchange = self.output_exchange_name
 
-        if properties is None:
-            properties = BasicProperties()
+        if persistent:
+            if properties is None:
+                properties = BasicProperties()
 
-        # persist messages on disk
-        # (otherwise may be lost on reboot)
-        # also pika.DeliveryMode.Persistent.value, but not in typing stubs?
-        properties.delivery_mode = PERSISTENT_DELIVERY_MODE
+            # persist messages on disk
+            # (otherwise may be lost on reboot)
+            # also pika.DeliveryMode.Persistent.value, but not in typing stubs?
+            properties.delivery_mode = PERSISTENT_DELIVERY_MODE
 
         def sender() -> None:
             msglogger.debug(
@@ -623,13 +625,18 @@ class QApp(App):
             self._breadcrumb_queue = []
 
         logger.info("_crumb_publish %d crumbs", len(crumbs))
-        crumbs.insert(
-            0, json.dumps({"version": self.BREADCRUMB_VERSION, "sent_at": time.time()})
-        )
-        # default is transient: not written to disk
-        msg = "\n".join(crumbs).encode("utf-8")
-        self._breadcrumb_channel.basic_publish(
-            BREADCRUMB_EXCHANGE, DEFAULT_ROUTING_KEY, msg
+        vdict = {
+            "version": self.BREADCRUMB_VERSION,
+            "sent_at": time.time(),
+            "app": self.process_name,
+        }
+        crumbs.insert(0, json.dumps(vdict))
+        self._send_message(
+            chan=self._breadcrumb_channel,
+            data="\n".join(crumbs).encode("utf-8"),
+            exchange=BREADCRUMB_EXCHANGE,
+            routing_key=DEFAULT_ROUTING_KEY,
+            persistent=False,  # do not write to disk
         )
 
 

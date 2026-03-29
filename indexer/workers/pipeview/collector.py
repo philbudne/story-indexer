@@ -75,6 +75,7 @@ class Collector(Worker):  # NOT a StoryWorker!
             if first:
                 first = False
                 if "version" in j:
+                    # also: "sent_at" (time.time), "app"
                     version = j["version"]
                     if version[0] > StoryMixin.BREADCRUMB_VERSION[0]:
                         logger.info("breadcrumbs too new: %r", version)
