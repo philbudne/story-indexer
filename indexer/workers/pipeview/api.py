@@ -23,7 +23,7 @@ logger = logging.getLogger("pipeview-api")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 # pool_size, echo??
-async_engine = create_async_engine(DATABASE_URL)
+async_engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
 
 # https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html#preventing-implicit-io-when-using-asyncsession
 AsyncSession = async_sessionmaker(async_engine, expire_on_commit=False)

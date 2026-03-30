@@ -118,4 +118,5 @@ class Collector(Worker):  # NOT a StoryWorker!
 
 
 if __name__ == "__main__":
+    # second argument controls logging and input queue name!
     run(Collector, "pipeview", "pipeview collector")
