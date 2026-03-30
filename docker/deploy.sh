@@ -433,6 +433,7 @@ dev)
     ;;
 esac
 
+BREADCRUMB_EXCHANGE=
 case "$PIPELINE_TYPE" in
 batch-fetcher|queue-fetcher)
     BREADCRUMB_EXCHANGE=breadcrumb;;
