@@ -118,4 +118,4 @@ class Collector(Worker):  # NOT a StoryWorker!
 
 
 if __name__ == "__main__":
-    run(Collector, "pipeview", "pipeview collector")
+    run(Collector, "pipeview-collector", "pipeview collector")
