@@ -443,6 +443,7 @@ services:
       ELASTICSEARCH_SNAPSHOT_REPO_TYPE: {{elasticsearch_snapshot_repo_type}}
       RUN: elastic-conf
 
+{% if breadcrumb_exchange != '' %}
   {{pipeview_postgres_container}}:
     <<: *base-service-settings
     deploy:
@@ -481,6 +482,7 @@ services:
       PIPEVIEW_API_PORT: {{pipeview_api_port}}
     ports:
       - "{{pipeview_api_port_exported}}:{{pipeview_api_port}}"
+{% endif %}
 
 {% macro define_volume(prefix, suffix='') %}
   {{prefix}}{{suffix}}:
