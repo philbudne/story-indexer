@@ -506,7 +506,9 @@ volumes:
 {{ define_volume('rabbitmq_data') }}
 {% endif %}
 {{ define_volume('worker_data') }}
+{% if breadcrumb_exchange != '' %}
 {{ define_volume('pipeview_db') }}
+{%- endif %}
 
 networks:
   default:
