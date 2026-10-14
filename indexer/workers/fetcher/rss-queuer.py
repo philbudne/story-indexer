@@ -172,7 +172,7 @@ class RSSQueuer(Queuer):
 
         # recover=True avoids fatal error when control characters seen in title
         for event, element in iterparse(fobj, events=("start", "end"), recover=True):
-            name = element.tag
+            name = str(element.tag)
             logger.debug("%s tag %s level %d", event, name, len(path))
             if event == "start":
                 path.append(name)

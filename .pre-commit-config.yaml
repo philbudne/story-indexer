@@ -1,5 +1,16 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
+
+# exclude env.py (alembic not yet used)
+# and old batch scraper files (scrapy not installed)
+exclude: |
+  (?x)^(
+    indexer/workers/pipeview/env\.py|
+    indexer/workers/fetcher/BlacklistRedirectMiddleware\.py|
+    indexer/workers/fetcher/batch_spider\.py|
+    indexer/workers/fetcher/fetch_worker\.py
+  )$
+
 repos:
   - repo: http://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -11,22 +22,25 @@ repos:
       - id: check-json
       - id: check-toml
   - repo: http://github.com/ambv/black
-    rev: 26.3.1
+    rev: 26.10.1
     hooks:
       - id: black
-        language_version: python3.10
-  - repo: http://github.com/pre-commit/mirrors-mypy
-    rev: v1.19.1
+        language_version: python3.13
+  - repo: local
     hooks:
       - id: mypy
-        entry: ./.pre-commit-run.sh mypy
-        additional_dependencies: ["pip==22.0.*"]
+        name: mypy
+        entry: uv run mypy
+        args: []
+        language: system
+        types: [python]
+        require_serial: true
   - repo: http://github.com/pycqa/flake8
-    rev: 7.3.0
+    rev: 7.4.1
     hooks:
       - id: flake8
   - repo: http://github.com/pycqa/isort
-    rev: 8.0.1
+    rev: 9.0.2
     hooks:
       - id: isort
         name: isort (python)

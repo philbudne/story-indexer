@@ -60,7 +60,7 @@ class DockerStats(IntervalMixin, App):
                         "skipping stack %s service %s", stack_name, service_name
                     )
                     continue
-                status = service.attrs.get("ServiceStatus", {})
+                status: dict[str, int] = service.attrs.get("ServiceStatus", {})
                 for input, output in (
                     ("RunningTasks", "service.running"),
                     ("DesiredTasks", "service.desired"),

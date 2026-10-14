@@ -98,7 +98,7 @@ class Parser(StoryWorker):
             else:
                 kde = None
             try:
-                raw_html = raw.html or ""
+                raw_html = raw.html or b""
                 ud = UnicodeDammit(raw_html, is_html=True, known_definite_encodings=kde)
             except UnicodeError as e:
                 # careful printing exception! may contain entire string!!
@@ -195,7 +195,7 @@ class Parser(StoryWorker):
 
         tag = ""
         try:
-            pp = XMLPullParser(["start"])
+            pp: XMLPullParser = XMLPullParser(["start"])
             pp.feed(data)  # pass substring? (first 8K?)
             event, element = next(pp.read_events())  # type: ignore[misc]
             if isinstance(element, Element):

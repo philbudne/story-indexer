@@ -491,9 +491,10 @@ class Fetcher(MultiThreadStoryWorker):
 
         # ***NOTE*** here with slot marked active *MUST* call slot.finish!!!!
         t0 = time.monotonic()
-        with self.timer("fetch"), insecure_requests_session(
-            MEDIA_CLOUD_USER_AGENT
-        ) as sess:
+        with (
+            self.timer("fetch"),
+            insecure_requests_session(MEDIA_CLOUD_USER_AGENT) as sess,
+        ):
             # log starting URL
             logger.info("fetch %s", url)
 
@@ -552,7 +553,7 @@ class Fetcher(MultiThreadStoryWorker):
             if status in SEPARATE_COUNTS:
                 counter = f"http-{status}"
             else:
-                counter = f"http-{status//100}xx"
+                counter = f"http-{status // 100}xx"
 
             msg = f"HTTP {status} {resp.reason}"
             if status in RETRY_HTTP_CODES:

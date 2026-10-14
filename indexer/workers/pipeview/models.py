@@ -57,6 +57,6 @@ class Crumb(Base):
             *CRUMB_UNIQUE_KEYS,  # index columns
             unique=True,
             # necessary to treat rows with NULL keys as identical
-            postgresql_nulls_not_distinct=True
+            postgresql_nulls_not_distinct=True,
         ),
     )

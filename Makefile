@@ -1,12 +1,13 @@
 ROOT_DIR := $(shell dirname "$(realpath $(firstword $(MAKEFILE_LIST)))")
 
-VENVDIR=venv
+# for uv .venv creation; also in Dockerfile, .pre-commit-config.yaml
+PYTHON=3.13
+
+# NOTE!! mypy now runs from uv .venv
+
+VENVDIR=.venv
 VENVBIN=$(VENVDIR)/bin
 VENVDONE=$(VENVDIR)/.done
-VENVPY=$(VENVBIN)/python
-
-PIP=$(VENVPY) -m pip
-PIP_COMPILE=$(VENVBIN)/pip-compile
 PRE_COMMIT=$(VENVBIN)/pre-commit
 
 ## display this message
@@ -22,64 +23,22 @@ help:
 ## tidy up local dev environment
 clean:
 	$(PRE_COMMIT) clean
-	rm -rf venv __pycache__ .mypy_cache indexer/__pycache__
+	rm -rf .venv venv __pycache__ .mypy_cache indexer/__pycache__
+
+# XXX also run (only?) in pre-commit!!!!
+## lock requirements
+requirements uv.lock: pyproject.toml
+	uv lock
 
 ## update .pre-commit-config.yaml
 update:
 	$(PRE_COMMIT) autoupdate
 
-## re-create requirements*.txt files
-requirements: requirements.txt requirements-dev.txt requirements-pre.txt
-
-# WISH: switch to "uv"? hopefully faster than pip-compile
-#	avoid needing to install pip-tools!!
-
-# build requirements to run
-requirements.txt: $(PIP_COMPILE) pyproject.toml
-	$(PIP_COMPILE) \
-		--strip-extras \
-		pyproject.toml
-
-# generate and/or update requirements-dev.txt (based on requirements.txt)
-requirements-dev.txt: $(PIP_COMPILE) requirements.txt pyproject.toml
-	echo "--constraint $(ROOT_DIR)/requirements.txt" | \
-		$(PIP_COMPILE) \
-		  	--strip-extras \
-			--extra dev \
-			--extra deploy \
-			--output-file requirements-dev.txt \
-			pyproject.toml
-
-# generate and/or update requirements-pre.txt (based on requirements.txt)
-requirements-pre.txt: $(PIP_COMPILE) requirements.txt pyproject.toml
-	echo "--constraint $(ROOT_DIR)/requirements.txt" | \
-		$(PIP_COMPILE) \
-			--strip-extras \
-			--extra pre-commit \
-			--extra deploy \
-			--output-file requirements-pre.txt \
-			pyproject.toml
-
-# avoids:
-# 1. circular dependency for building requirements-dev.txt
-# 2. always installing pip-tools
-# typing-extensions required on Python 3.10 for Self?
-$(VENVBIN)/pip-compile: $(VENVPY)
-	$(PIP) install typing-extensions pip-tools
-
 ## install all required dependencies for development
-install: $(VENVDONE)
-
-# .pre-commit-run.sh will reinstall from requirements-pre.txt when it changes
-$(VENVDONE): $(VENVPY) requirements-dev.txt requirements-pre.txt
-	$(PIP) install -r requirements-dev.txt
+install $(VENVDONE): Makefile uv.lock
+	uv sync --python $(PYTHON) --extra dev --extra deploy --extra typing
 	$(PRE_COMMIT) install
 	touch $(VENVDONE)
-
-# create venv if not present:
-# don't depend on VENVDIR: changes when VENVDONE created
-$(VENVPY):
-	python3 -m venv $(VENVDIR)
 
 ## check and format code
 lint:	$(VENVDONE)
@@ -93,4 +52,8 @@ deploy:	$(VENVDONE)
 test:	$(VENVDONE)
 	$(VENVBIN)/pytest
 
-.PHONY: all clean help install install-app-dev install-deps-dev install-deps-prod lint test upgrade upgrade-dev upgrade-prod
+## list outdated packages
+list-outdated:
+	uv pip list --outdated
+
+#.PHONY: all clean help install install-app-dev install-deps-dev install-deps-prod lint test upgrade upgrade-dev upgrade-prod

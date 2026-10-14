@@ -14,7 +14,7 @@ to be a utility, rather than a library...
 import argparse
 import logging
 import sys
-from typing import Callable, Dict, List, Union, cast
+from typing import Callable, List, Union, cast
 
 # PyPI
 from pika.exchange_type import ExchangeType
@@ -139,7 +139,7 @@ class Pipeline(QApp):
     WAIT_FOR_QUEUE_CONFIGURATION = False
 
     def __init__(self, name: str, descr: str):
-        self.procs: Dict[str, _Process] = {}
+        self.procs: dict[str, _Process] = {}
         super().__init__(name, descr)
 
     #### QApp methods
@@ -234,7 +234,7 @@ class Pipeline(QApp):
         def exchange(ename: str) -> None:
             if create:
                 logger.debug(f"creating {etype} exchange {ename}")
-                chan.exchange_declare(ename, etype, durable=True)
+                chan.exchange_declare(ename, cast(ExchangeType, etype), durable=True)
             else:
                 logger.debug(f"deleting exchange {ename}")
                 chan.exchange_delete(ename)
@@ -380,11 +380,11 @@ class Pipeline(QApp):
         assert callable(meth)
         return cast(Callable[[], None], meth)
 
-    def get_definitions(self) -> Dict:
+    def get_definitions(self) -> dict:
         api = self.admin_api()
         defns = api.get_definitions()
         assert isinstance(defns, dict)
-        return defns
+        return cast(dict, defns)
 
 
 class MyPipeline(Pipeline):

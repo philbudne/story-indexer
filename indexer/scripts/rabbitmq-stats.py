@@ -63,6 +63,8 @@ class QStats(IntervalMixin, QApp):
 
                 for q in queues:
                     name = q.get("name")
+                    if name is None:  # for mypy
+                        continue
                     self.g(q, "memory", "queues", "mem", "name", name)
                     self.g(q, "messages_ready", "queues", "ready", "name", name)
                     self.g(

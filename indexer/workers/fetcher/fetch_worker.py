@@ -152,7 +152,7 @@ class FetchWorker(StoryProducer):
         elif http_meta.response_code in (403, 404, 429):
             status_label = f"http-{http_meta.response_code}"
         else:
-            status_label = f"http-{http_meta.response_code//100}xx"
+            status_label = f"http-{http_meta.response_code // 100}xx"
 
         self.incr_stories(status_label, http_meta.final_url or "")
 
