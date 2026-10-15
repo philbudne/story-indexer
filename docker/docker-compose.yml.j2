@@ -7,16 +7,7 @@
  # dictionary keys in ASCII sort order,
  # avoiding extra whitespace inside double-curlies with plain variables
  #
- # When you add use of a new {{variable}}, run
- #   ./deploy.sh -Bprod
- #   ./deploy.sh -Bstaging
- #   ./deploy.sh -Bdev
- # to ensure all three paths in deploy.sh supply a value!
- # (that an "add VAR" has been added to the script)
- # this will also catch bad int/bool values, but not empty strings.
- # XXX maybe this check can be run by pre-commit??
- #
- # As a rule, "policy" decisions should be made in deploy.sh,
+ # As a rule, "policy" decisions should be made in deploy.py
  # which should pass on the results as values to be subtituted
  # in this template.  The type of deployment (dev/staging/prod)
  # has explicitly NOT been passed as a value to this template
@@ -45,7 +36,7 @@
  # (declared inline under foo-service-settings)
  #}
 
-################ context from deploy script
+################ context from deploy script, for posterity
 
 x-context: &context
   stack_name: {{stack_name}}
@@ -142,19 +133,18 @@ x-worker-service-settings: &worker-service-settings
 ################################################################
 
 services:
-  {{worker_image_name}}:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-
-    deploy:
-      # entry for "build" only
-      replicas: 0
-
-    image: {{worker_image_full}}
-
   {{syslog_sink_container}}:
     <<: *worker-service-settings
+
+    # Build directive; Only appears once (generates warning when
+    # deploting): it's arbitrary where it appears.  Moved under a real
+    # service to avoid a bogus service with no running containers!
+    # build_context points to a clean checkout to avoid dragging
+    # in dirt, and to ensure that everything is added/checked in.
+    build:
+      context: {{build_context}}
+      dockerfile: {{build_context}}/docker/Dockerfile
+
     deploy:
       <<: *worker-deploy-settings
       placement:
@@ -388,22 +378,6 @@ services:
     environment:
       <<: *worker-environment-vars
       RUN: rabbitmq-stats
-
-{% if elasticsearch_snapshot_cronjob_enable == 'true' %}
-  # Elasticsearch Snaphost worker
-  elastic-snapshots:
-    <<: *worker-service-settings
-    labels:
-        swarm.cronjob.enable: "{{elasticsearch_snapshot_cronjob_enable}}"
-        swarm.cronjob.schedule: "0 0 * * *"
-    environment:
-      <<: *worker-environment-vars
-      RUN: elastic-snapshots
-      ELASTICSEARCH_SNAPSHOT_REPO: mediacloud-elasticsearch-snapshots
-{% endif %}
-
-  # NOTE! Not building Docker image here (yet)
-  # until version/revision control issues worked out.
 
   # run to apply ILM ES
   elastic-conf:

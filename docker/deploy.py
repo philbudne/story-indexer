@@ -147,6 +147,7 @@ JINJA_SETTINGS = [
     XV("ARCHIVER_S3_SECRET_ACCESS_KEY"),  # private
     XV("ARCHIVER_S3_ACCESS_KEY_ID"),  # private
     XV("BREADCRUMB_EXCHANGE", check=XC.ALLOW_EMPTY),  # empty to disable
+    XV("BUILD_CONTEXT"),  # dynamic: path to clean source checkout
     XV("DEPLOYMENT_BRANCH"),  # dynamic, for context
     XV("DEPLOYMENT_DATE_TIME"),  # dynamic, for context
     XV("DEPLOYMENT_GIT_HASH"),  # dynamic, for context
@@ -168,11 +169,6 @@ JINJA_SETTINGS = [
     XV("ELASTICSEARCH_PORT_BASE_EXPORTED", check=XC.INT, cond=es_docker),
     XV("ELASTICSEARCH_HOSTS"),  # dynamic
     XV("ELASTICSEARCH_ILM_MAX_SHARD_SIZE"),
-    XV(
-        # NOT bool! NEVER ENABLED: remove from template & here??
-        "ELASTICSEARCH_SNAPSHOT_CRONJOB_ENABLE",
-        default="false",
-    ),
     XV("ELASTICSEARCH_SNAPSHOT_REPO"),  # private
     XV("ELASTICSEARCH_SNAPSHOT_REPO_SETTINGS_BUCKET", check=XC.ALLOW_EMPTY),  # private
     XV(
@@ -234,7 +230,7 @@ JINJA_SETTINGS = [
 
 class StoryIndexerDeploy(DockerDeploy):
     INST_BASE = "indexer"  # app base name
-    IMAGE_NAME = "indexer-worker"  # maybe just "indexer"??
+    IMAGE_NAME = "indexer"  # (was indexer-worker)
     IMAGE_REPO = ""  # don't push to registry!
 
     # map command line names to inst_base prefix & port bias
@@ -727,6 +723,33 @@ class StoryIndexerDeploy(DockerDeploy):
             print("======== settings")
             for key, val in self.settings.items():
                 print(key, val)
+
+        # get git remote URL for doing a clean checkout for docker
+        # image build to ensure that new files are added and
+        # committed, and that other detrius from the developer
+        # directory isn't baked into the image.
+
+        local = "~~LOCAL~~"
+        if self.is_dev():
+            if self.unpushed:
+                remote = local
+            else:
+                remote = self.git_origin_remote()
+        else:
+            remote = self.git_upstream_remote()
+
+        if remote == local:
+            # top level .git file
+            git_url = os.path.join(os.path.dirname(self.deploy_dir), ".git")
+        else:
+            remotes = self.git_remotes()
+            git_url = remotes[remote]
+
+        clone = self.git_clone(self.PROJECT_REPO, git_url, rev=self.branch)
+        print("cloned sources", git_url)
+
+        # subbed into docker-compose.yml.j2:
+        self.settings_add("BUILD_CONTEXT", clone)
 
 
 d = StoryIndexerDeploy()

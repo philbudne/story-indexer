@@ -32,20 +32,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# installed in both development and pre-commit venvs
-# (come up with a better name if there's another case!)
+# installed in development venv
+# (used to also be installed in pre-commit mypy venv)
+# come up with a better name if there's another case!
 deploy = [
-  "jinja2 ~= 3.1.0",
-  "mc-deploy @ git+https://github.com/mediacloud/system-dev-ops@mc-deploy-0.15.latest#subdirectory=deploy/mc-deploy",
+  "jinja2 ~= 3.1.0",	# for docker-compose.yml creation by deploy.py
+  "mc-deploy @ git+https://github.com/mediacloud/system-dev-ops@mc-deploy-0.19.latest#subdirectory=deploy/mc-deploy",
 ]
 
 # packages installed in development venv, but not pre-commit:
+# (uv installs unless --no-dev or UV_NO_DEV set??)
 dev = [
   "pre-commit ~= 4.7.0",
   "pytest ~= 9.1.1",
 ]
 
 # packages for type checking
+# (installed in venv mypy is run from)
 typing = [
   "boto3-stubs[s3] ~= 1.43.112",
   "mypy ~= 2.4.0",
