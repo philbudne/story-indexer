@@ -93,6 +93,14 @@ class Parser(StoryWorker):
         with self.timer("encoding"):
             raw = story.raw_html()
             encoding = raw.encoding or hmd.encoding
+            # Phil 10/2026: I've seen many pages in "vitals" that seem like
+            # they were treated as ISO-LATIN-1 when the contents were most
+            # likely UTF-8 (the only non-ASCII characters were those
+            # Unicode codepoints present in ISO-LATIN-1 in sequences that
+            # appear to correspond to UTF-8 encodings).  At the very least,
+            # I'm thinking if/when a page SAYS it's in LATIN (or any
+            # non-UTF encoding?), to try decoding as UTF-8 first, which is
+            # VERY unlikely to succeed for non-UTF input.
             if encoding:
                 kde = [encoding]
             else:
@@ -111,8 +119,8 @@ class Parser(StoryWorker):
                 else:
                     raise CannotDecode()
 
-        # XXX also ud.unicode_markup??
-        html = ud.markup  # decoded HTML
+        # had been using "markup", but started returning bytes
+        html = ud.unicode_markup  # decoded HTML
         assert isinstance(html, str)
 
         logger.info("parsing %s: %d characters", log_url, len(html))
