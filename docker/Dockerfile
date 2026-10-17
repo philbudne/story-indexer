@@ -4,7 +4,7 @@
 # MC changes:
 # use python.org images for both stages.
 
-ARG PYTHON_IMAGE=python:3.12-slim-trixie
+ARG PYTHON_IMAGE=python:3.13-slim-trixie
 
 # First, build the application in the `/app` directory.
 # See `Dockerfile` for details.
