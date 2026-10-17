@@ -137,7 +137,7 @@ services:
     <<: *worker-service-settings
 
     # Build directive; Only appears once (generates warning when
-    # deploting): it's arbitrary where it appears.  Moved under a real
+    # deploying): it's arbitrary where it appears.  Moved under a real
     # service to avoid a bogus service with no running containers!
     # build_context points to a clean checkout to avoid dragging
     # in dirt, and to ensure that everything is added/checked in.
