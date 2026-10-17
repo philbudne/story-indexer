@@ -90,11 +90,12 @@ constraints, and testing flavors vs deployment types!!
 # TODO:
 # make sure all indexer args used!!
 
+import grp
 import os
 import sys
 
 # PyPI:
-import jinja2
+import jinja2  # for docker-compose.yml.j2
 
 # mc-deploy package (in mediacloud/system-dev-ops repo):
 from mc_deploy.base import CmdArgs, CmdParser, Flavor, ParserArgs
@@ -155,6 +156,7 @@ JINJA_SETTINGS = [
     XV("DEPLOYMENT_ID"),  # dynamic, for RabbitMQ sentinal
     XV("DEPLOYMENT_OPTIONS", check=XC.ALLOW_EMPTY),  # dynamic, for context
     XV("DEPLOYMENT_USER"),  # dynamic, for context
+    XV("DOCKER_GROUP_ID", check=XC.INT),  # dynamic
     XV("ELASTICSEARCH_CLUSTER", default="mc_elasticsearch"),
     XV("ELASTICSEARCH_CONFIG_DIR", default="./conf/elasticsearch/templates"),
     XV("ELASTICSEARCH_CONTAINERS", check=XC.INT),
@@ -750,6 +752,11 @@ class StoryIndexerDeploy(DockerDeploy):
 
         # subbed into docker-compose.yml.j2:
         self.settings_add("BUILD_CONTEXT", clone)
+
+        # get docker group id, needed for docker-stats and swarm-cronjob
+        # containers to access /var/run/docker.sock
+        docker_group = grp.getgrnam("docker")
+        self.settings_add("DOCKER_GROUP_ID", str(docker_group.gr_gid))
 
 
 d = StoryIndexerDeploy()

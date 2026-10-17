@@ -169,6 +169,8 @@ services:
     image: crazymax/swarm-cronjob
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
+    group_add:
+      - "{{docker_group_id}}"
 
 {% if rabbitmq_containers > 0 %}
   {{rabbitmq_container}}:
@@ -363,6 +365,8 @@ services:
       ARGS: "--stack {{stack_name}}"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
+    group_add:
+      - "{{docker_group_id}}"
 
   # run a copy on each ES server?
   elastic-stats:
