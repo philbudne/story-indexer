@@ -6,8 +6,11 @@ Media Cloud online news story indexer.
 
 ### Setup
 
+Requires `uv` package manager.
+Can be installed by `pip install uv`
+
 To create an environment for development: run `make install` from the
-command line.  This creates a virtual environment (venv), installs all
+command line.  This creates a virtual environment (.venv), installs all
 dependencies, and installs a git pre-commit hook.
 
 ### "linting"
@@ -21,8 +24,7 @@ Run `make` (or `make help`) to see the list of other useful targets
 ### Updating requirements
 
 Required Python libraries are specified in `pyproject.toml`.
-`requirements.txt` and `requirements-dev.txt` can be regenerated using
-`make requirements`
+When requirements are changed run `make requirements` to regenerate `uv.lock`
 
 ### Update pre-commit config
 
