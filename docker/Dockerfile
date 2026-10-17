@@ -70,4 +70,4 @@ WORKDIR /app
 ARG RUN
 ENV RUN=${RUN}
 
-ENTRYPOINT [ "/bin/sh", "-c", "${APP_DOCKER}/bin/indirect.sh" ]
+ENTRYPOINT [ "/bin/sh", "-c", "/app/bin/indirect.sh" ]
