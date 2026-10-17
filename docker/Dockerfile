@@ -14,6 +14,14 @@ FROM ${PYTHON_IMAGE} AS builder
 # get uv from astral image (could just mount it for RUN uv .... lines?
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/
 
+# need git for mc-logging
+# used to need gcc for some package install on ARM Macs?
+# perform cleanup inside RUN, so files never added to layer
+RUN apt-get update && \
+    apt-get install -y git && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
 # Omit development dependencies
