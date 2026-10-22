@@ -17,7 +17,8 @@ dependencies = [
   "docker ~= 7.1.0",
   "elasticsearch ~= 8.17.2",   # must match ES server major/minor
   "fastapi ~= 0.143.0",	       # pipeview api
-  # lxml installed by mediacloud-metadata
+  "lxml",	       # installed by mediacloud-metadata dependencies
+  # NOTE! .pre-commit-config EXPLICITLY checks for new .latest tag!
   "mc-logging @ git+https://github.com/mediacloud/system-dev-ops@mc-logging-0.2.latest#subdirectory=logging/mc-logging",
   "mediacloud-metadata ~= 2.0.0",
   "pika ~= 1.4.4",
@@ -37,6 +38,7 @@ dependencies = [
 # come up with a better name if there's another case!
 deploy = [
   "jinja2 ~= 3.1.0",	# for docker-compose.yml creation by deploy.py
+  # NOTE! .pre-commit-config EXPLICITLY checks for new .latest tag!
   "mc-deploy @ git+https://github.com/mediacloud/system-dev-ops@mc-deploy-0.19.latest#subdirectory=deploy/mc-deploy",
 ]
 

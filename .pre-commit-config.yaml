@@ -12,6 +12,12 @@ exclude: |
   )$
 
 repos:
+  # re-resolve X.Y.latest tags to git hashes:
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.12.3
+    hooks:
+      - id: uv-lock
+        args: [--upgrade-package, mc-deploy, --upgrade-package, mc-logging]
   - repo: http://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
