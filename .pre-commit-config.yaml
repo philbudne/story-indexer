@@ -18,6 +18,14 @@ repos:
     hooks:
       - id: uv-lock
         args: [--upgrade-package, mc-deploy, --upgrade-package, mc-logging]
+  - repo: local
+    hooks:
+      - id: make-install
+        name: make install
+        entry: make install
+        language: system
+        pass_filenames: false
+        always_run: true
   - repo: http://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
