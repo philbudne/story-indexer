@@ -201,7 +201,7 @@ Extracted text.
 ##### parsed_date (str)
 
 Populated by Parser (not mcmetadata),
-despite the name, is UTC date-time (YYYY-MM-DD hh:mm:ss.uuuuuu
+despite the name, is UTC date-time in ISO formatted (YYYY-MM-DDThh:mm:ss.uuuuuu)
 
 Importer stores in Elasticsearch as `indexed_date`; If not available,
 Importer will use datetime.utcnow().isoformat() of at time of import.
@@ -218,7 +218,7 @@ the stored document) to milliseconds in the index.
 
 ### WARC "response" record
 
-`WARC-Target-URI` header is (in preferred order) on of
+`WARC-Target-URI` header is (in preferred order) one of
 `http_metadata.final_url`, `content_metadata.url`,
 `content_metadata.original_url`, or `rss_entry.link`.
 
@@ -413,3 +413,52 @@ It attempts to add a `rabbitmq_headers` metadata object, BUT it will
 (currently) fail if any RabbitMQ headers contain data types (eg;
 datetimes) that are not JSON serializable
 [A github PR exists to solve this, by only dumping "x-mc-..." headers].
+
+### Apendix Z: "pipeview"
+
+Pipeview is an adjunct to the regular pipeline that records the final
+disposition of stories.
+
+The `StoryApp.incr_stories` method used to report outcome in each
+pipeline app queues a "breakcrumb" when passed a `story` (Story object)
+or a JSON `crumb` argument.
+
+The format of a breakcrumb is:
+```
+{
+    "date": "YYYY-MM-DD",
+    "feed_id": INT
+    "source_id": INT,
+    "domain": "DOMAIN",
+    "app": "PROCESS_NAME",
+    "status": "STATUS"
+}
+```
+
+Breadcrumbs are batched in a newline-delimited JSON sent to the
+`breadcrumb` exchange, which is directed to the `pipeview-in` queue.
+The first line in each message contains the message version and the
+timestamp from the time the message was queued.
+
+The `pipeview-in` queue is processed by
+`indexer/workers/pipeview/collector.py` which increments the `count`
+column for the row matching ALL the columns in the breadcrumb,
+producing daily counts of each outcome.
+
+`indexer/workers/pipeview/api.py` implements a query API at URL
+`/sum/` taking query parameters:
+
+zero or more `col=OUTPUT_COL` columns to filter and GROUP BY.
+
+And zero or more filter parameters:
+* `source_id=INT`
+* `feed_id=INT`
+* `domain=STR`
+* `app=STR`
+* `status=STR`
+* `start_date=YYYY-MM-DD`
+* `end_date=YYYY-MM-DD`
+
+The response is JSON, with a `sum` column with the sum of counts for
+all matching rows, and a `count` for the number of matching rows
+summed.
